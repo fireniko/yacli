@@ -2256,11 +2256,9 @@ client_id = "client-123"
     assert_eq!(activity_detail_payload["id"], activity_id);
     assert_eq!(activity_detail_payload["operation"], "disk.upload");
     assert_eq!(activity_detail_payload["source"], "mcp");
-    assert!(
-        activity_detail_payload["replay_command"]
-            .as_str()
-            .expect("replay command")
-            .contains("--dry-run")
+    assert_eq!(
+        activity_detail_payload["replay_command"],
+        "yacli disk upload <аргументы>"
     );
 }
 

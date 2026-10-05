@@ -6,7 +6,9 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::account_store::{AccountStore, validate_account};
-use crate::activity_store::{ActivityEntry, ActivityStore, NewActivityEntry, record_activity};
+use crate::activity_store::{
+    ActivityEntry, ActivityStore, NewActivityEntry, clear_activity, record_activity,
+};
 use crate::activity_undo::{
     ActivityUndoApplied, ActivityUndoResult, apply_activity_undo, calendar_create_undo,
     disk_publish_undo,
@@ -146,7 +148,6 @@ pub fn execute(cli: Cli) -> Result<RenderedOutput> {
         )),
     }
 }
-
 
 /// Persists credentials first, then runs cleanup. A cleanup failure is reported
 /// on stderr and does not fail the command or lose the saved credentials.
@@ -724,6 +725,21 @@ fn execute_activity(format: OutputFormat, action: ActivityCommand) -> Result<Ren
                 render_activity_show_table(&entry),
             )
         }
+        ActivityCommand::Clear { yes } => {
+            if !yes {
+                return Err(YacliError::Validation(
+                    "activity clear: удаление всех записей журнала нужно подтвердить флагом --yes (`yacli activity clear --yes`)"
+                        .to_string(),
+                ));
+            }
+            let removed = clear_activity()?;
+            ok_output(
+                format,
+                "activity.clear",
+                json!({ "removed": removed }),
+                format!("removed	{removed}"),
+            )
+        }
         ActivityCommand::Undo { id } => {
             let store = ActivityStore::load()?;
             let entry = store.find(&id).cloned().ok_or_else(|| {
@@ -734,8 +750,8 @@ fn execute_activity(format: OutputFormat, action: ActivityCommand) -> Result<Ren
                 source: "cli".to_string(),
                 operation: "activity.undo".to_string(),
                 account: applied.account.clone(),
-                summary: applied.summary.clone(),
-                replay_command: applied.replay_command.clone(),
+                summary: applied.logged_summary.clone(),
+                replay_command: applied.logged_replay_command.clone(),
                 undo: None,
             });
             ok_output(
@@ -940,7 +956,6 @@ pub fn apply_safe_doctor_remediation(
         }
     }
 
-
     let doctor_after = doctor_payload(account, goal)?;
     let status = if failed_count > 0 {
         "failed"
@@ -1059,7 +1074,6 @@ fn record_activity_best_effort(entry: NewActivityEntry) {
 
 fn transfer_activity_summary(
     summary_prefix: &str,
-    target: &str,
     attempts: usize,
     elapsed_ms: u64,
     resumed_from_bytes: Option<u64>,
@@ -1072,7 +1086,7 @@ fn transfer_activity_summary(
         details.push(format!("resume: {bytes} B"));
     }
 
-    format!("{summary_prefix}: {target} ({})", details.join(", "))
+    format!("{summary_prefix} ({})", details.join(", "))
 }
 
 fn shell_quote(value: &str) -> String {
@@ -1388,14 +1402,14 @@ fn execute_auth(format: OutputFormat, action: AuthCommand) -> Result<RenderedOut
                         ensure_calendar_supports_app_password(account)?;
                     }
                     if client_id.is_some() || code.is_some() || login_hint.is_some() {
-                        return Err(YacliError::Validation(
-                            format!("{service_name} login uses app password auth; rerun with `yacli login {service_name} --env-var NAME` (recommended) or `--app-password <app-password>`"),
-                        ));
+                        return Err(YacliError::Validation(format!(
+                            "{service_name} login uses app password auth; rerun with `yacli login {service_name} --env-var NAME` (recommended) or `--app-password <app-password>`"
+                        )));
                     }
                     if env_var.is_some() && app_password.is_some() {
-                        return Err(YacliError::Validation(
-                            format!("{service_name} login accepts either `--app-password` or `--env-var`, but not both"),
-                        ));
+                        return Err(YacliError::Validation(format!(
+                            "{service_name} login accepts either `--app-password` or `--env-var`, but not both"
+                        )));
                     }
 
                     let (credential_ref, mode) = match (app_password, env_var) {
@@ -1491,14 +1505,12 @@ fn execute_auth(format: OutputFormat, action: AuthCommand) -> Result<RenderedOut
                             resolved_login_hint.as_deref(),
                         )?;
                         if code.is_none() {
-                            save_pending_session(
-                                PendingOauthSession::from_authorization_session(
-                                    account_name.clone(),
-                                    &services,
-                                    resolved_login_hint.clone(),
-                                    session.clone(),
-                                ),
-                            )?;
+                            save_pending_session(PendingOauthSession::from_authorization_session(
+                                account_name.clone(),
+                                &services,
+                                resolved_login_hint.clone(),
+                                session.clone(),
+                            ))?;
                             pending_session_persisted = true;
                         }
                         session
@@ -1754,7 +1766,7 @@ fn execute_disk(format: OutputFormat, action: DiskCommand) -> Result<RenderedOut
                     source: "cli".to_string(),
                     operation: "disk.mkdir".to_string(),
                     account: resolved_account.clone(),
-                    summary: format!("Создана папка на Диске: {}", resource.path),
+                    summary: "Создана папка на Диске".to_string(),
                     replay_command: format!("yacli disk mkdir {}", shell_quote(&resource.path)),
                     undo: None,
                 });
@@ -1823,7 +1835,6 @@ fn execute_disk(format: OutputFormat, action: DiskCommand) -> Result<RenderedOut
                         account: resolved_account.clone(),
                         summary: transfer_activity_summary(
                             "Загружен файл на Диск",
-                            &uploaded.remote_path,
                             uploaded.attempts,
                             uploaded.elapsed_ms,
                             None,
@@ -1878,14 +1889,7 @@ fn execute_disk(format: OutputFormat, action: DiskCommand) -> Result<RenderedOut
                         source: "cli".to_string(),
                         operation: "disk.upload_link".to_string(),
                         account: resolved_account.clone(),
-                        summary: format!(
-                            "Загружен и опубликован ресурс на Диске: {}",
-                            result
-                                .resource
-                                .public_url
-                                .as_deref()
-                                .unwrap_or(&result.resource.path)
-                        ),
+                        summary: "Загружен и опубликован ресурс на Диске".to_string(),
                         replay_command: format!(
                             "yacli disk upload-link --source {} --path {} --dry-run",
                             shell_quote(&result.upload.source_path),
@@ -1944,7 +1948,6 @@ fn execute_disk(format: OutputFormat, action: DiskCommand) -> Result<RenderedOut
                     account: resolved_account.clone(),
                     summary: transfer_activity_summary(
                         "Скачан файл с Диска",
-                        &resource.path,
                         artifact.attempts,
                         artifact.elapsed_ms,
                         Some(artifact.resumed_from_bytes),
@@ -1993,10 +1996,7 @@ fn execute_disk(format: OutputFormat, action: DiskCommand) -> Result<RenderedOut
                         source: "cli".to_string(),
                         operation: "disk.publish".to_string(),
                         account: resolved_account.clone(),
-                        summary: format!(
-                            "Опубликован ресурс на Диске: {}",
-                            resource.public_url.as_deref().unwrap_or(&resource.path)
-                        ),
+                        summary: "Опубликован ресурс на Диске".to_string(),
                         replay_command: format!(
                             "yacli disk publish {} --dry-run",
                             shell_quote(&resource.path)
@@ -2045,13 +2045,7 @@ fn execute_disk(format: OutputFormat, action: DiskCommand) -> Result<RenderedOut
                         source: "cli".to_string(),
                         operation: "disk.unpublish".to_string(),
                         account: resolved_account.clone(),
-                        summary: format!(
-                            "Отозвана публичная ссылка на Диске: {}",
-                            result
-                                .revoked_public_url
-                                .as_deref()
-                                .unwrap_or(&result.resource.path)
-                        ),
+                        summary: "Отозвана публичная ссылка на Диске".to_string(),
                         replay_command: format!(
                             "yacli disk unpublish {} --dry-run",
                             shell_quote(&result.resource.path)
@@ -2255,11 +2249,7 @@ fn execute_calendar(format: OutputFormat, action: CalendarCommand) -> Result<Ren
                         source: "cli".to_string(),
                         operation: "calendar.create".to_string(),
                         account: resolved_account.clone(),
-                        summary: format!(
-                            "Создано событие в календаре {}: {}",
-                            calendar.name,
-                            event.summary.as_deref().unwrap_or("-")
-                        ),
+                        summary: "Создано событие в календаре".to_string(),
                         replay_command: replay,
                         undo: calendar_create_undo(&calendar, &event),
                     });
@@ -2445,7 +2435,9 @@ fn execute_mail(format: OutputFormat, action: MailCommand) -> Result<RenderedOut
                     render_mail_send_review_table(&resolved_account, &review),
                 )
             } else {
+                let attachment_count = request.attachments.len();
                 let sent = send_mail_message(&context.smtp_host, context.smtp_port, auth, request)?;
+                let recipient_count = sent.to.len() + sent.cc.len() + sent.bcc_count;
 
                 ok_output(
                     format,
@@ -2474,9 +2466,7 @@ fn execute_mail(format: OutputFormat, action: MailCommand) -> Result<RenderedOut
                         operation: "mail.send".to_string(),
                         account: resolved_account.clone(),
                         summary: format!(
-                            "Отправлено письмо {}: {}",
-                            sent.to.first().cloned().unwrap_or_else(|| "-".to_string()),
-                            sent.subject
+                            "Отправлено письмо (получателей: {recipient_count}, вложений: {attachment_count})"
                         ),
                         replay_command: replay,
                         undo: None,
@@ -2574,11 +2564,7 @@ fn execute_mail(format: OutputFormat, action: MailCommand) -> Result<RenderedOut
                             source: "cli".to_string(),
                             operation: "mail.send_link".to_string(),
                             account: resolved_account.clone(),
-                            summary: format!(
-                                "Отправлена публичная ссылка на файл: {} -> {}",
-                                result.resource.path,
-                                result.resource.public_url.as_deref().unwrap_or("-")
-                            ),
+                            summary: "Отправлена публичная ссылка на файл".to_string(),
                             replay_command: replay,
                             undo: None,
                         });
@@ -2588,11 +2574,8 @@ fn execute_mail(format: OutputFormat, action: MailCommand) -> Result<RenderedOut
                             source: "cli".to_string(),
                             operation: "mail.send_link.partial".to_string(),
                             account: resolved_account.clone(),
-                            summary: format!(
-                                "Публичная ссылка создана, но письмо не отправлено: {} -> {}",
-                                partial.resource.path,
-                                partial.recovery.share_public_link.public_url
-                            ),
+                            summary: "Публичная ссылка создана, но письмо не отправлено"
+                                .to_string(),
                             replay_command: partial.recovery.retry_mail_step.command.clone(),
                             undo: Some(disk_publish_undo(&partial.resource)),
                         });
@@ -2677,10 +2660,7 @@ fn execute_mail(format: OutputFormat, action: MailCommand) -> Result<RenderedOut
                         source: "cli".to_string(),
                         operation: "mail.send_published_link".to_string(),
                         account: resolved_account.clone(),
-                        summary: format!(
-                            "Отправлена уже опубликованная ссылка: {}",
-                            request.public_url
-                        ),
+                        summary: "Отправлена уже опубликованная ссылка".to_string(),
                         replay_command: send_published_link_command(&request, true),
                         undo: None,
                     });
@@ -2915,11 +2895,7 @@ fn execute_mail_invite(format: OutputFormat, action: MailInviteCommand) -> Resul
                         source: "cli".to_string(),
                         operation: "mail.invite.create_event.partial".to_string(),
                         account: resolved_account.clone(),
-                        summary: format!(
-                            "Не удалось создать событие из приглашения письма {}: {}",
-                            uid,
-                            partial.selected_invite.summary.as_deref().unwrap_or("-")
-                        ),
+                        summary: format!("Не удалось создать событие из приглашения письма {uid}"),
                         replay_command: partial.recovery.retry_calendar_step.command.clone(),
                         undo: None,
                     });
@@ -2973,11 +2949,7 @@ fn execute_mail_invite(format: OutputFormat, action: MailInviteCommand) -> Resul
                     source: "cli".to_string(),
                     operation: "mail.invite.create_event".to_string(),
                     account: resolved_account.clone(),
-                    summary: format!(
-                        "Создано событие из приглашения письма {}: {}",
-                        uid,
-                        event.summary.as_deref().unwrap_or("-")
-                    ),
+                    summary: format!("Создано событие из приглашения письма {uid}"),
                     replay_command: replay,
                     undo: calendar_create_undo(&calendar, &event),
                 });
@@ -3113,7 +3085,6 @@ fn execute_disk_public(format: OutputFormat, action: DiskPublicCommand) -> Resul
                         .unwrap_or_else(|| "-".to_string()),
                     summary: transfer_activity_summary(
                         "Скачан публичный файл Диска",
-                        &artifact.output_path,
                         artifact.attempts,
                         artifact.elapsed_ms,
                         Some(artifact.resumed_from_bytes),
@@ -6012,6 +5983,9 @@ mod login_ordering_tests {
             },
         );
         assert!(result.is_err());
-        assert!(!*cleaned.borrow(), "PKCE session must survive a failed save");
+        assert!(
+            !*cleaned.borrow(),
+            "PKCE session must survive a failed save"
+        );
     }
 }

@@ -288,6 +288,12 @@ pub enum ActivityCommand {
         #[arg(value_name = "ID")]
         id: String,
     },
+    /// Удалить все записи журнала действий (нужен флаг --yes).
+    Clear {
+        /// Подтвердить удаление всех записей.
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

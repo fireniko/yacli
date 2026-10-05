@@ -36,6 +36,28 @@ impl ActivityUndoAction {
     }
 }
 
+impl ActivityUndoAction {
+    /// Команда без значений пользователя: для записи отката в журнал.
+    pub fn redacted_command_line(&self) -> &'static str {
+        match self {
+            Self::CalendarDelete { .. } => "yacli calendar delete <uid>",
+            Self::DiskUnpublish { .. } => "yacli disk unpublish <путь>",
+        }
+    }
+
+    /// Нейтральная сводка отката без названий событий, путей и ссылок.
+    pub fn redacted_undo_summary(&self, activity_id: &str) -> String {
+        match self {
+            Self::CalendarDelete { .. } => {
+                format!("Откат действия {activity_id}: удалено событие календаря")
+            }
+            Self::DiskUnpublish { .. } => {
+                format!("Откат действия {activity_id}: отозвана публичная ссылка на Диске")
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ActivityUndoResult {
@@ -55,6 +77,12 @@ pub struct ActivityUndoApplied {
     pub account: String,
     pub summary: String,
     pub replay_command: String,
+    /// Что попадает в журнал вместо `summary` (без содержимого пользователя).
+    #[serde(skip)]
+    pub logged_summary: String,
+    /// Что попадает в журнал вместо `replay_command`.
+    #[serde(skip)]
+    pub logged_replay_command: String,
     pub result: ActivityUndoResult,
 }
 
@@ -83,6 +111,8 @@ pub fn apply_activity_undo(entry: &ActivityEntry) -> Result<ActivityUndoApplied>
     })?;
 
     let replay_command = undo.command_line();
+    let logged_summary = undo.redacted_undo_summary(&entry.id);
+    let logged_replay_command = undo.redacted_command_line().to_string();
 
     match undo {
         ActivityUndoAction::CalendarDelete { calendar, uid } => {
@@ -106,6 +136,8 @@ pub fn apply_activity_undo(entry: &ActivityEntry) -> Result<ActivityUndoApplied>
                     deleted_event.summary.as_deref().unwrap_or("-")
                 ),
                 replay_command,
+                logged_summary,
+                logged_replay_command,
                 result: ActivityUndoResult::CalendarDelete {
                     calendar,
                     deleted_event,
@@ -132,6 +164,8 @@ pub fn apply_activity_undo(entry: &ActivityEntry) -> Result<ActivityUndoApplied>
                         .unwrap_or(&result.resource.path)
                 ),
                 replay_command,
+                logged_summary,
+                logged_replay_command,
                 result: ActivityUndoResult::DiskUnpublish { result },
             })
         }

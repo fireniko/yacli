@@ -2570,11 +2570,9 @@ client_id = "client-123"
     assert_eq!(activity_json["id"], activity_id);
     assert_eq!(activity_json["operation"], "disk.upload");
     assert_eq!(activity_json["source"], "mcp");
-    assert!(
-        activity_json["replay_command"]
-            .as_str()
-            .expect("replay command")
-            .contains("--dry-run")
+    assert_eq!(
+        activity_json["replay_command"],
+        "yacli disk upload <аргументы>"
     );
 }
 

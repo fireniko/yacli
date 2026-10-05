@@ -87,11 +87,19 @@ impl ActivityStore {
         self.file.entries.iter().find(|entry| entry.id == id)
     }
 
+    /// Удаляет все записи (файл остаётся пустым журналом текущей версии).
+    pub fn clear(&mut self) -> usize {
+        let removed = self.file.entries.len();
+        self.file = ActivityFile::default();
+        removed
+    }
+
     pub fn append(&mut self, new_entry: NewActivityEntry) -> ActivityEntry {
         let undo_command = new_entry
             .undo
             .as_ref()
             .map(ActivityUndoAction::command_line);
+        let replay_command = redact_replay_command(&new_entry.operation, new_entry.replay_command);
         let entry = ActivityEntry {
             id: generate_activity_id(),
             occurred_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
@@ -99,7 +107,7 @@ impl ActivityStore {
             operation: new_entry.operation,
             account: new_entry.account,
             summary: new_entry.summary,
-            replay_command: new_entry.replay_command,
+            replay_command,
             undo: new_entry.undo,
             undo_command,
         };
@@ -109,6 +117,30 @@ impl ActivityStore {
         }
         entry
     }
+}
+
+/// Журнал не хранит содержимое пользователя (получателей, темы, имена файлов,
+/// пути Диска, публичные ссылки). Для операций почты, календаря и Диска вместо
+/// реальной команды сохраняется шаблон с плейсхолдерами; это единая точка
+/// защиты, поэтому новые места записи не смогут случайно утечь в журнал.
+/// Технический идентификатор для отката хранится только в `undo`/`undo_command`.
+fn redact_replay_command(operation: &str, replay_command: String) -> String {
+    if !(operation.starts_with("mail.")
+        || operation.starts_with("calendar.")
+        || operation.starts_with("disk."))
+    {
+        return replay_command;
+    }
+    if operation == "mail.send" {
+        return "yacli mail send <получатель> <тема> <текст>".to_string();
+    }
+    let words = operation
+        .trim_end_matches(".partial")
+        .split('.')
+        .map(|part| part.replace('_', "-"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("yacli {words} <аргументы>")
 }
 
 pub fn record_activity(new_entry: NewActivityEntry) -> Result<ActivityEntry> {
@@ -129,4 +161,95 @@ fn generate_activity_id() -> String {
         .map(char::from)
         .collect();
     format!("act_{}_{}", Utc::now().format("%Y%m%dT%H%M%SZ"), suffix)
+}
+
+pub fn clear_activity() -> Result<usize> {
+    let mut store = ActivityStore::load()?;
+    let removed = store.clear();
+    store.save()?;
+    Ok(removed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mail_send_replay_has_no_values() {
+        let replay = redact_replay_command(
+            "mail.send",
+            "yacli mail send 'me@example.com' 'Secret subject' 'x' --dry-run".to_string(),
+        );
+        assert_eq!(replay, "yacli mail send <получатель> <тема> <текст>");
+    }
+
+    #[test]
+    fn other_operations_use_generic_placeholder() {
+        let replay = |op: &str| redact_replay_command(op, "yacli x 'secret'".to_string());
+        assert_eq!(
+            replay("mail.send_link.partial"),
+            "yacli mail send-link <аргументы>"
+        );
+        assert_eq!(
+            replay("disk.public.download"),
+            "yacli disk public download <аргументы>"
+        );
+        assert_eq!(
+            replay("mail.invite.create_event"),
+            "yacli mail invite create-event <аргументы>"
+        );
+        assert_eq!(
+            replay("calendar.create"),
+            "yacli calendar create <аргументы>"
+        );
+    }
+
+    #[test]
+    fn non_content_operations_keep_replay() {
+        let kept = redact_replay_command("doctor.apply_safe", "yacli doctor --apply-safe".into());
+        assert_eq!(kept, "yacli doctor --apply-safe");
+        let undo = redact_replay_command("activity.undo", "yacli disk unpublish <путь>".into());
+        assert_eq!(undo, "yacli disk unpublish <путь>");
+    }
+
+    #[test]
+    fn append_redacts_and_clear_empties() {
+        let mut store = ActivityStore {
+            file: ActivityFile::default(),
+        };
+        let entry = store.append(NewActivityEntry {
+            source: "cli".into(),
+            operation: "mail.send".into(),
+            account: "main".into(),
+            summary: "Отправлено письмо (получателей: 1, вложений: 0)".into(),
+            replay_command: "yacli mail send 'me@example.com' 'MARKER_SUBJECT' 'MARKER_BODY'"
+                .into(),
+            undo: None,
+        });
+        assert!(!entry.replay_command.contains("MARKER"));
+        assert!(!entry.replay_command.contains("example.com"));
+        assert_eq!(store.clear(), 1);
+        assert!(store.entries().is_empty());
+        let toml = toml::to_string_pretty(&store.file).unwrap();
+        assert!(toml.contains("version = 1"));
+    }
+
+    #[test]
+    fn legacy_entries_still_parse() {
+        let legacy = r#"
+version = 1
+
+[[entries]]
+id = "act_1"
+occurred_at = "2026-01-01T00:00:00Z"
+source = "cli"
+operation = "mail.send"
+account = "main"
+summary = "Отправлено письмо a@example.com: тема"
+replay_command = "yacli mail send a@example.com тема текст"
+"#;
+        let file: ActivityFile = toml::from_str(legacy).unwrap();
+        assert_eq!(file.entries.len(), 1);
+        assert!(file.entries[0].summary.contains("a@example.com"));
+    }
 }

@@ -419,9 +419,11 @@ pub fn serve_http(listen: &str, public_url: Option<&str>) -> Result<()> {
         .map_err(|err| YacliError::Io(format!("failed to start HTTP runtime: {err}")))?;
 
     runtime.block_on(async move {
-        let listener = tokio::net::TcpListener::bind(listen_addr).await.map_err(|err| {
-            YacliError::Io(format!("failed to bind MCP HTTP server at {listen}: {err}"))
-        })?;
+        let listener = tokio::net::TcpListener::bind(listen_addr)
+            .await
+            .map_err(|err| {
+                YacliError::Io(format!("failed to bind MCP HTTP server at {listen}: {err}"))
+            })?;
         let bound_port = listener
             .local_addr()
             .map_err(|err| YacliError::Io(format!("failed to read bound address: {err}")))?
@@ -2543,8 +2545,8 @@ fn activity_undo(id: &str) -> Result<Value> {
         source: "mcp".to_string(),
         operation: "activity.undo".to_string(),
         account: applied.account.clone(),
-        summary: applied.summary.clone(),
-        replay_command: applied.replay_command.clone(),
+        summary: applied.logged_summary.clone(),
+        replay_command: applied.logged_replay_command.clone(),
         undo: None,
     });
     Ok(json!({
@@ -2586,7 +2588,9 @@ fn mail_send(account: Option<&str>, request: MailSendToolRequest) -> Result<Valu
             }
         }))
     } else {
+        let attachment_count = send_request.attachments.len();
         let sent = send_mail_message(&context.smtp_host, context.smtp_port, auth, send_request)?;
+        let recipient_count = sent.to.len() + sent.cc.len() + sent.bcc_count;
         let mut replay = format!(
             "yacli mail send {} {} {} --dry-run",
             shell_quote(sent.to.first().map(String::as_str).unwrap_or("")),
@@ -2598,9 +2602,7 @@ fn mail_send(account: Option<&str>, request: MailSendToolRequest) -> Result<Valu
             operation: "mail.send".to_string(),
             account: resolved_account.clone(),
             summary: format!(
-                "Отправлено письмо {}: {}",
-                sent.to.first().cloned().unwrap_or_else(|| "-".to_string()),
-                sent.subject
+                "Отправлено письмо (получателей: {recipient_count}, вложений: {attachment_count})"
             ),
             replay_command: std::mem::take(&mut replay),
             undo: None,
@@ -2668,11 +2670,7 @@ fn mail_send_link(account: Option<&str>, request: MailSendLinkToolRequest) -> Re
                     source: "mcp".to_string(),
                     operation: "mail.send_link".to_string(),
                     account: resolved_account.clone(),
-                    summary: format!(
-                        "Отправлена публичная ссылка на файл: {} -> {}",
-                        result.resource.path,
-                        result.resource.public_url.as_deref().unwrap_or("-")
-                    ),
+                    summary: "Отправлена публичная ссылка на файл".to_string(),
                     replay_command: replay,
                     undo: None,
                 });
@@ -2687,10 +2685,7 @@ fn mail_send_link(account: Option<&str>, request: MailSendLinkToolRequest) -> Re
                     source: "mcp".to_string(),
                     operation: "mail.send_link.partial".to_string(),
                     account: resolved_account.clone(),
-                    summary: format!(
-                        "Публичная ссылка создана, но письмо не отправлено: {} -> {}",
-                        partial.resource.path, partial.recovery.share_public_link.public_url
-                    ),
+                    summary: "Публичная ссылка создана, но письмо не отправлено".to_string(),
                     replay_command: partial.recovery.retry_mail_step.command.clone(),
                     undo: Some(disk_publish_undo(&partial.resource)),
                 });
@@ -2741,10 +2736,7 @@ fn mail_send_published_link(
             source: "mcp".to_string(),
             operation: "mail.send_published_link".to_string(),
             account: resolved_account.clone(),
-            summary: format!(
-                "Отправлена уже опубликованная ссылка: {}",
-                send_request.public_url
-            ),
+            summary: "Отправлена уже опубликованная ссылка".to_string(),
             replay_command: send_published_link_command(&send_request, true),
             undo: None,
         });
@@ -2913,9 +2905,8 @@ fn mail_invite_create_event(
                 operation: "mail.invite.create_event.partial".to_string(),
                 account: resolved_account.clone(),
                 summary: format!(
-                    "Не удалось создать событие из приглашения письма {}: {}",
-                    request.uid,
-                    partial.selected_invite.summary.as_deref().unwrap_or("-")
+                    "Не удалось создать событие из приглашения письма {}",
+                    request.uid
                 ),
                 replay_command: partial.recovery.retry_calendar_step.command.clone(),
                 undo: None,
@@ -2939,11 +2930,7 @@ fn mail_invite_create_event(
         source: "mcp".to_string(),
         operation: "mail.invite.create_event".to_string(),
         account: resolved_account.clone(),
-        summary: format!(
-            "Создано событие из приглашения письма {}: {}",
-            request.uid,
-            event.summary.as_deref().unwrap_or("-")
-        ),
+        summary: format!("Создано событие из приглашения письма {}", request.uid),
         replay_command: replay,
         undo: calendar_create_undo(&calendar, &event),
     });
@@ -3042,11 +3029,7 @@ fn calendar_create(account: Option<&str>, request: CalendarCreateToolRequest) ->
             source: "mcp".to_string(),
             operation: "calendar.create".to_string(),
             account: resolved_account.clone(),
-            summary: format!(
-                "Создано событие в календаре {}: {}",
-                calendar.name,
-                event.summary.as_deref().unwrap_or("-")
-            ),
+            summary: "Создано событие в календаре".to_string(),
             replay_command: replay,
             undo: calendar_create_undo(&calendar, &event),
         });
@@ -3113,7 +3096,7 @@ fn disk_mkdir(account: Option<&str>, path: &str) -> Result<Value> {
         source: "mcp".to_string(),
         operation: "disk.mkdir".to_string(),
         account: resolved_account.clone(),
-        summary: format!("Создана папка на Диске: {}", resource.path),
+        summary: "Создана папка на Диске".to_string(),
         replay_command: format!("yacli disk mkdir {}", shell_quote(&resource.path)),
         undo: None,
     });
@@ -3156,7 +3139,7 @@ fn disk_upload(account: Option<&str>, request: DiskUploadToolRequest) -> Result<
             source: "mcp".to_string(),
             operation: "disk.upload".to_string(),
             account: resolved_account.clone(),
-            summary: format!("Загружен файл на Диск: {}", upload.remote_path),
+            summary: "Загружен файл на Диск".to_string(),
             replay_command: replay,
             undo: None,
         });
@@ -3190,14 +3173,7 @@ fn disk_upload_link(account: Option<&str>, request: DiskUploadLinkToolRequest) -
             source: "mcp".to_string(),
             operation: "disk.upload_link".to_string(),
             account: resolved_account.clone(),
-            summary: format!(
-                "Загружен и опубликован ресурс на Диске: {}",
-                result
-                    .resource
-                    .public_url
-                    .as_deref()
-                    .unwrap_or(&result.resource.path)
-            ),
+            summary: "Загружен и опубликован ресурс на Диске".to_string(),
             replay_command: format!(
                 "yacli disk upload-link --source {} --path {} --dry-run",
                 shell_quote(&result.upload.source_path),
@@ -3235,7 +3211,7 @@ fn disk_download(account: Option<&str>, request: DiskDownloadToolRequest) -> Res
         source: "mcp".to_string(),
         operation: "disk.download".to_string(),
         account: resolved_account.clone(),
-        summary: mcp_transfer_activity_summary("Скачан файл с Диска", &resource.path, &download),
+        summary: mcp_transfer_activity_summary("Скачан файл с Диска", &download),
         replay_command: replay,
         undo: None,
     });
@@ -3267,10 +3243,7 @@ fn disk_publish(account: Option<&str>, request: DiskPublishToolRequest) -> Resul
             source: "mcp".to_string(),
             operation: "disk.publish".to_string(),
             account: resolved_account.clone(),
-            summary: format!(
-                "Опубликован ресурс на Диске: {}",
-                resource.public_url.as_deref().unwrap_or(&resource.path)
-            ),
+            summary: "Опубликован ресурс на Диске".to_string(),
             replay_command: format!(
                 "yacli disk publish {} --dry-run",
                 shell_quote(&resource.path)
@@ -3304,13 +3277,7 @@ fn disk_unpublish(account: Option<&str>, request: DiskUnpublishToolRequest) -> R
             source: "mcp".to_string(),
             operation: "disk.unpublish".to_string(),
             account: resolved_account.clone(),
-            summary: format!(
-                "Отозвана публичная ссылка на Диске: {}",
-                result
-                    .revoked_public_url
-                    .as_deref()
-                    .unwrap_or(&result.resource.path)
-            ),
+            summary: "Отозвана публичная ссылка на Диске".to_string(),
             replay_command: format!(
                 "yacli disk unpublish {} --dry-run",
                 shell_quote(&result.resource.path)
@@ -3342,7 +3309,7 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-fn mcp_transfer_activity_summary(prefix: &str, target: &str, download: &DownloadedFile) -> String {
+fn mcp_transfer_activity_summary(prefix: &str, download: &DownloadedFile) -> String {
     let mut details = vec![
         format!("попыток: {}", download.attempts),
         format!("время: {} ms", download.elapsed_ms),
@@ -3350,7 +3317,7 @@ fn mcp_transfer_activity_summary(prefix: &str, target: &str, download: &Download
     if download.resumed_from_bytes > 0 {
         details.push(format!("resume: {} B", download.resumed_from_bytes));
     }
-    format!("{prefix}: {target} ({})", details.join(", "))
+    format!("{prefix} ({})", details.join(", "))
 }
 
 fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
@@ -4622,10 +4589,11 @@ mod http_hardening_tests {
 
     #[test]
     fn auth_is_required_for_every_tool_call_and_resource_read() {
-        let msg = |method: &str, name: &str| {
-            json!({"jsonrpc":"2.0","id":1,"method":method,"params":{"name":name}})
-        };
-        assert!(message_requires_http_auth(&msg("tools/call", "yacli.goal.route")));
+        let msg = |method: &str, name: &str| json!({"jsonrpc":"2.0","id":1,"method":method,"params":{"name":name}});
+        assert!(message_requires_http_auth(&msg(
+            "tools/call",
+            "yacli.goal.route"
+        )));
         assert!(message_requires_http_auth(&msg("tools/call", "anything")));
         assert!(message_requires_http_auth(&msg("resources/read", "")));
         assert!(!message_requires_http_auth(&msg("initialize", "")));

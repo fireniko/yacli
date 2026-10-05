@@ -4169,7 +4169,7 @@ client_id = "client-123"
         items[0]["replay_command"]
             .as_str()
             .expect("replay command")
-            .contains("mail send-published-link")
+            .contains("mail send-link <аргументы>")
     );
 }
 
@@ -5876,12 +5876,9 @@ client_id = "client-123"
             .expect("summary")
             .contains("попыток: 1")
     );
-    assert!(
-        items[0]["replay_command"]
-            .as_str()
-            .expect("replay command")
-            .contains("--dry-run")
-    );
+    assert_eq!(items[0]["replay_command"], "yacli disk upload <аргументы>");
+    let stored = items[0].to_string();
+    assert!(!stored.contains("report.pdf") && !stored.contains("disk:/"));
 
     let entry_id = items[0]["id"].as_str().expect("entry id");
     let show_output = yacli()
@@ -6144,9 +6141,8 @@ rest_base_url = "{}"
             .contains("попыток: 1")
     );
     let replay = items[0]["replay_command"].as_str().expect("replay command");
-    assert!(replay.contains("yacli disk public download"));
-    assert!(replay.contains("--public-key"));
-    assert!(replay.contains("--output"));
+    assert_eq!(replay, "yacli disk public download <аргументы>");
+    assert!(!replay.contains("--public-key"));
 }
 
 #[test]

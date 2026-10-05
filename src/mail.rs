@@ -648,6 +648,275 @@ pub fn forward_mail_message(
     })
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MailMarkRequest {
+    pub uid: u64,
+    pub seen: Option<bool>,
+    pub flagged: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
+pub struct MailMarkResult {
+    pub uid: u64,
+    pub folder: String,
+    pub flags_before: Vec<String>,
+    /// При `dry_run` — предполагаемые флаги, иначе — флаги после изменения.
+    pub flags_after: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MailMoveTarget<'a> {
+    Folder(&'a str),
+    /// Папка с IMAP-атрибутом `\Trash`.
+    Trash,
+}
+
+#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
+pub struct MailMoveResult {
+    pub uid: u64,
+    pub from: String,
+    pub to: String,
+    /// `move` (UID MOVE) или `copy_expunge` (UID COPY + UID EXPUNGE, UIDPLUS).
+    pub method: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_uid: Option<u64>,
+}
+
+const FLAG_SEEN: &str = "\\Seen";
+const FLAG_FLAGGED: &str = "\\Flagged";
+const FLAG_DELETED: &str = "\\Deleted";
+
+pub fn mark_mail_message(
+    imap_host: &str,
+    imap_port: u16,
+    auth: MailSessionAuth,
+    mailbox_name: &str,
+    request: &MailMarkRequest,
+    dry_run: bool,
+) -> Result<MailMarkResult> {
+    validate_mark_request(request)?;
+    let mut session = open_authenticated_session(imap_host, imap_port, auth)?;
+    let result = mark_in_session(&mut session, mailbox_name, request, dry_run);
+    let _ = session.logout();
+    result
+}
+
+pub fn move_mail_message(
+    imap_host: &str,
+    imap_port: u16,
+    auth: MailSessionAuth,
+    mailbox_name: &str,
+    uid: u64,
+    target: MailMoveTarget<'_>,
+    dry_run: bool,
+) -> Result<MailMoveResult> {
+    validate_mail_uid("mail move", uid)?;
+    let mut session = open_authenticated_session(imap_host, imap_port, auth)?;
+    let result = move_in_session(&mut session, mailbox_name, uid, target, dry_run);
+    let _ = session.logout();
+    result
+}
+
+fn validate_mail_uid(action: &str, uid: u64) -> Result<()> {
+    if uid == 0 {
+        return Err(YacliError::Validation(format!(
+            "{action} <id> must be greater than zero"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_mark_request(request: &MailMarkRequest) -> Result<()> {
+    validate_mail_uid("mail mark", request.uid)?;
+    if request.seen.is_none() && request.flagged.is_none() {
+        return Err(YacliError::Validation(
+            "mail mark requires at least one of seen/flagged".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Флаги, которые нужно добавить и снять.
+fn mark_flag_changes(request: &MailMarkRequest) -> (Vec<&'static str>, Vec<&'static str>) {
+    let mut add = Vec::new();
+    let mut remove = Vec::new();
+    for (value, flag) in [(request.seen, FLAG_SEEN), (request.flagged, FLAG_FLAGGED)] {
+        match value {
+            Some(true) => add.push(flag),
+            Some(false) => remove.push(flag),
+            None => {}
+        }
+    }
+    (add, remove)
+}
+
+fn mark_in_session<S: Read + Write>(
+    session: &mut ImapSession<S>,
+    mailbox_name: &str,
+    request: &MailMarkRequest,
+    dry_run: bool,
+) -> Result<MailMarkResult> {
+    let (folder, _) = session.open_folder_for_write(mailbox_name)?;
+    let flags_before = session.fetch_uid_flags(request.uid)?;
+    let (add, remove) = mark_flag_changes(request);
+
+    let flags_after = if dry_run {
+        let mut predicted = flags_before
+            .iter()
+            .filter(|flag| !remove.iter().any(|r| flag.eq_ignore_ascii_case(r)))
+            .cloned()
+            .collect::<Vec<_>>();
+        for flag in &add {
+            if !predicted.iter().any(|f| f.eq_ignore_ascii_case(flag)) {
+                predicted.push((*flag).to_string());
+            }
+        }
+        predicted
+    } else {
+        if !add.is_empty() {
+            session.store_flags(request.uid, true, &add)?;
+        }
+        if !remove.is_empty() {
+            session.store_flags(request.uid, false, &remove)?;
+        }
+        session.fetch_uid_flags(request.uid)?
+    };
+
+    Ok(MailMarkResult {
+        uid: request.uid,
+        folder: folder.name,
+        flags_before,
+        flags_after,
+    })
+}
+
+fn move_in_session<S: Read + Write>(
+    session: &mut ImapSession<S>,
+    mailbox_name: &str,
+    uid: u64,
+    target: MailMoveTarget<'_>,
+    dry_run: bool,
+) -> Result<MailMoveResult> {
+    let (source, folders) = session.open_folder_for_write(mailbox_name)?;
+    let dest = match target {
+        MailMoveTarget::Folder(name) => {
+            let dest = resolve_mail_folder(&folders, name)?;
+            if dest.raw_name == source.raw_name {
+                return Err(YacliError::Validation(
+                    "нельзя переместить письмо в ту же папку".to_string(),
+                ));
+            }
+            dest
+        }
+        MailMoveTarget::Trash => {
+            let trash = find_trash_folder(&folders)?;
+            if trash.raw_name == source.raw_name {
+                return Err(YacliError::Validation(
+                    "письмо уже в корзине; безвозвратное удаление не поддерживается".to_string(),
+                ));
+            }
+            trash
+        }
+    };
+    if dest
+        .attributes
+        .iter()
+        .any(|attr| attr.eq_ignore_ascii_case("\\Noselect"))
+    {
+        return Err(YacliError::Validation(
+            "в целевую папку нельзя перемещать письма (\\Noselect)".to_string(),
+        ));
+    }
+
+    session.fetch_uid_flags(uid)?;
+
+    let capabilities = session.capabilities()?;
+    let has = |name: &str| capabilities.iter().any(|cap| cap == name);
+    let use_move = has("MOVE");
+    if !use_move && !has("UIDPLUS") {
+        return Err(YacliError::UnsupportedOperation(
+            "сервер не поддерживает безопасное перемещение (нужны MOVE или UIDPLUS)".to_string(),
+        ));
+    }
+
+    let mut result = MailMoveResult {
+        uid,
+        from: source.name.clone(),
+        to: dest.name.clone(),
+        method: if use_move { "move" } else { "copy_expunge" }.to_string(),
+        new_uid: None,
+    };
+    if dry_run {
+        return Ok(result);
+    }
+
+    if use_move {
+        result.new_uid = session.run_uid_transfer("MOVE", uid, &dest.raw_name)?;
+    } else {
+        result.new_uid = session.run_uid_transfer("COPY", uid, &dest.raw_name)?;
+        // Копия уже создана: любая дальнейшая ошибка должна это явно сообщать.
+        let finish = session.store_flags(uid, true, &[FLAG_DELETED]).and_then(|()| {
+            session.expunge_uid(uid).inspect_err(|_| {
+                let _ = session.store_flags(uid, false, &[FLAG_DELETED]);
+            })
+        });
+        finish.map_err(|err| {
+            YacliError::Api(format!(
+                "письмо скопировано в целевую папку, но не удалено из исходной: {err}"
+            ))
+        })?;
+    }
+    Ok(result)
+}
+
+fn resolve_mail_folder<'a>(folders: &'a [MailFolder], requested: &str) -> Result<&'a MailFolder> {
+    let requested = requested.trim();
+    let found = folders
+        .iter()
+        .find(|folder| folder.name == requested)
+        .or_else(|| folders.iter().find(|folder| folder.raw_name == requested))
+        .or_else(|| {
+            let mut matches = folders
+                .iter()
+                .filter(|folder| folder.name.to_lowercase() == requested.to_lowercase());
+            match (matches.next(), matches.next()) {
+                (Some(folder), None) => Some(folder),
+                _ => None,
+            }
+        });
+    found.ok_or_else(|| {
+        YacliError::Validation(format!(
+            "папка `{requested}` не найдена; список папок: `yacli mail folders`"
+        ))
+    })
+}
+
+fn find_trash_folder(folders: &[MailFolder]) -> Result<&MailFolder> {
+    folders
+        .iter()
+        .find(|folder| {
+            folder
+                .attributes
+                .iter()
+                .any(|attr| attr.eq_ignore_ascii_case("\\Trash"))
+        })
+        .ok_or_else(|| {
+            YacliError::Validation(
+                "на сервере нет папки корзины (атрибут \\Trash); укажите папку через `mail move`"
+                    .to_string(),
+            )
+        })
+}
+
+/// Разбирает `[COPYUID <validity> <src> <dst>]`; возвращает UID только если
+/// он одиночный.
+fn parse_copyuid(line: &str) -> Option<u64> {
+    let start = line.find("COPYUID ")?;
+    let rest = line[start + "COPYUID ".len()..].split(']').next()?;
+    let dst = rest.split_whitespace().nth(2)?;
+    dst.parse::<u64>().ok()
+}
+
 fn open_authenticated_session(
     imap_host: &str,
     imap_port: u16,
@@ -724,8 +993,8 @@ struct SmtpResponse {
     lines: Vec<String>,
 }
 
-struct ImapSession {
-    reader: BufReader<native_tls::TlsStream<TcpStream>>,
+struct ImapSession<S: Read + Write = native_tls::TlsStream<TcpStream>> {
+    reader: BufReader<S>,
     next_tag: u32,
 }
 
@@ -777,10 +1046,7 @@ impl ImapSession {
             ))
         })?;
 
-        let mut session = Self {
-            reader: BufReader::new(tls),
-            next_tag: 1,
-        };
+        let mut session = Self::from_stream(tls);
         let greeting = session.read_line()?;
         if !greeting.starts_with("* OK") {
             return Err(YacliError::Api(format!(
@@ -790,6 +1056,15 @@ impl ImapSession {
         }
 
         Ok(session)
+    }
+}
+
+impl<S: Read + Write> ImapSession<S> {
+    fn from_stream(stream: S) -> Self {
+        Self {
+            reader: BufReader::new(stream),
+            next_tag: 1,
+        }
     }
 
     fn authenticate_xoauth2(&mut self, account: &str, access_token: &str) -> Result<()> {
@@ -992,6 +1267,116 @@ impl ImapSession {
                 return Ok(literal);
             }
         }
+    }
+
+    /// Единая точка «открыть папку на запись»: находит папку в LIST (по
+    /// отображаемому имени или RAW_NAME), делает SELECT (не EXAMINE) и
+    /// убеждается, что сервер не открыл её только для чтения.
+    /// Возвращает выбранную папку и весь список папок (для резолва целевой).
+    fn open_folder_for_write(&mut self, requested: &str) -> Result<(MailFolder, Vec<MailFolder>)> {
+        let folders = self.list_folders()?;
+        let folder = resolve_mail_folder(&folders, requested)?.clone();
+        let quoted_mailbox = quote_imap_string(&folder.raw_name);
+        let (lines, tagged) = self.run_command(&format!("SELECT {quoted_mailbox}"))?;
+        parse_tagged_status(
+            &self.current_tag(),
+            &tagged,
+            "IMAP SELECT",
+            TaggedErrorKind::Api,
+        )?;
+        if lines
+            .iter()
+            .chain(std::iter::once(&tagged))
+            .any(|line| line.to_ascii_uppercase().contains("[READ-ONLY]"))
+        {
+            return Err(YacliError::UnsupportedOperation(
+                "сервер открыл папку только для чтения; изменить письмо нельзя".to_string(),
+            ));
+        }
+        Ok((folder, folders))
+    }
+
+    /// Единая точка «проверить, что письмо с таким UID есть»: STORE/MOVE по
+    /// несуществующему UID на IMAP «успешны» молча, поэтому проверяем заранее.
+    /// Заодно возвращает текущие флаги письма.
+    fn fetch_uid_flags(&mut self, uid: u64) -> Result<Vec<String>> {
+        let (lines, tagged) = self.run_command(&format!("UID FETCH {uid} (UID FLAGS)"))?;
+        parse_tagged_status(
+            &self.current_tag(),
+            &tagged,
+            "IMAP UID FETCH",
+            TaggedErrorKind::Api,
+        )?;
+        for line in lines {
+            if line.starts_with("* ") && line.contains(" FETCH (") {
+                let metadata = parse_fetch_metadata(&line)?;
+                if metadata.uid == uid {
+                    return Ok(metadata.flags);
+                }
+            }
+        }
+        Err(YacliError::Validation(format!(
+            "письмо с UID {uid} не найдено в выбранной папке"
+        )))
+    }
+
+    fn capabilities(&mut self) -> Result<Vec<String>> {
+        let (lines, tagged) = self.run_command("CAPABILITY")?;
+        parse_tagged_status(
+            &self.current_tag(),
+            &tagged,
+            "IMAP CAPABILITY",
+            TaggedErrorKind::Api,
+        )?;
+        Ok(lines
+            .iter()
+            .filter_map(|line| line.strip_prefix("* CAPABILITY "))
+            .flat_map(str::split_whitespace)
+            .map(str::to_ascii_uppercase)
+            .collect())
+    }
+
+    /// `UID STORE <uid> +/-FLAGS.SILENT (<flags>)` для одного письма.
+    fn store_flags(&mut self, uid: u64, add: bool, flags: &[&str]) -> Result<()> {
+        let sign = if add { '+' } else { '-' };
+        let (_, tagged) = self.run_command(&format!(
+            "UID STORE {uid} {sign}FLAGS.SILENT ({})",
+            flags.join(" ")
+        ))?;
+        parse_tagged_status(
+            &self.current_tag(),
+            &tagged,
+            "IMAP UID STORE",
+            TaggedErrorKind::Api,
+        )
+    }
+
+    /// Возвращает новый UID из ответа `[COPYUID ...]`, если сервер его прислал.
+    fn run_uid_transfer(&mut self, verb: &str, uid: u64, dest_raw: &str) -> Result<Option<u64>> {
+        let (lines, tagged) = self.run_command(&format!(
+            "UID {verb} {uid} {}",
+            quote_imap_string(dest_raw)
+        ))?;
+        parse_tagged_status(
+            &self.current_tag(),
+            &tagged,
+            &format!("IMAP UID {verb}"),
+            TaggedErrorKind::Api,
+        )?;
+        Ok(lines
+            .iter()
+            .chain(std::iter::once(&tagged))
+            .find_map(|line| parse_copyuid(line)))
+    }
+
+    fn expunge_uid(&mut self, uid: u64) -> Result<()> {
+        let (_, tagged) = self.run_command(&format!("UID EXPUNGE {uid}"))?;
+        parse_tagged_status(
+            &self.current_tag(),
+            &tagged,
+            "IMAP UID EXPUNGE",
+            TaggedErrorKind::Api,
+        )
     }
 
     fn logout(&mut self) -> Result<()> {
@@ -3836,5 +4221,478 @@ mod tests {
         assert!(id.starts_with("yacli-"));
         assert!(id.ends_with("@yandex.ru"));
         assert!(!id.contains("nextstat"));
+    }
+}
+
+#[cfg(test)]
+mod mail_management_tests {
+    use super::{
+        ImapSession, MailMarkRequest, MailMoveTarget, encode_modified_utf7, mark_in_session,
+        move_in_session, parse_copyuid,
+    };
+    use crate::error::YacliError;
+    use std::io::{Read, Result as IoResult, Write};
+    use std::sync::{Arc, Mutex};
+
+    const SRC_UID: u64 = 7;
+    const ARCHIVE: &str = "Архив";
+    const TRASH: &str = "Удаленные";
+
+    #[derive(Clone)]
+    struct MockCfg {
+        caps: &'static str,
+        with_trash: bool,
+        readonly: bool,
+        fail_expunge: bool,
+        initial_flags: &'static str,
+    }
+
+    impl Default for MockCfg {
+        fn default() -> Self {
+            Self {
+                caps: "IMAP4rev1 MOVE UIDPLUS",
+                with_trash: true,
+                readonly: false,
+                fail_expunge: false,
+                initial_flags: "",
+            }
+        }
+    }
+
+    /// Поток-«сервер»: на каждую записанную команду сразу готовит ответ.
+    struct ScriptedImap {
+        cfg: MockCfg,
+        flags: Vec<String>,
+        pending: Vec<u8>,
+        out: Vec<u8>,
+        out_pos: usize,
+        commands: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl ScriptedImap {
+        fn respond(&mut self, command: &str) -> (String, String) {
+            let upper = command.to_ascii_uppercase();
+            let folder = |attrs: &str, name: &str| {
+                format!(
+                    "* LIST ({attrs}) \"/\" \"{}\"\r\n",
+                    encode_modified_utf7(name)
+                )
+            };
+            if upper.starts_with("LIST ") {
+                let mut text = folder("\\HasNoChildren", "INBOX");
+                text.push_str(&folder("\\HasNoChildren \\Archive", ARCHIVE));
+                if self.cfg.with_trash {
+                    text.push_str(&folder("\\HasNoChildren \\Trash", TRASH));
+                }
+                (text, "OK LIST done".into())
+            } else if upper.starts_with("SELECT ") {
+                let status = if self.cfg.readonly {
+                    "OK [READ-ONLY] SELECT done"
+                } else {
+                    "OK [READ-WRITE] SELECT done"
+                };
+                ("* 3 EXISTS\r\n".into(), status.into())
+            } else if upper == "CAPABILITY" {
+                (
+                    format!("* CAPABILITY {}\r\n", self.cfg.caps),
+                    "OK done".into(),
+                )
+            } else if let Some(rest) = upper.strip_prefix("UID FETCH ") {
+                let uid: u64 = rest.split(' ').next().unwrap().parse().unwrap();
+                let text = if uid == SRC_UID {
+                    format!(
+                        "* 1 FETCH (UID {uid} FLAGS ({}))\r\n",
+                        self.flags.join(" ")
+                    )
+                } else {
+                    String::new()
+                };
+                (text, "OK FETCH done".into())
+            } else if command.starts_with("UID STORE ") {
+                let parts: Vec<&str> = command.splitn(5, ' ').collect();
+                let add = parts[3].starts_with('+');
+                let list = parts[4].trim_matches(|c| c == '(' || c == ')');
+                for flag in list.split_whitespace() {
+                    self.flags.retain(|f| f != flag);
+                    if add {
+                        self.flags.push(flag.to_string());
+                    }
+                }
+                (String::new(), "OK STORE done".into())
+            } else if upper.starts_with("UID MOVE ") {
+                (
+                    "* OK [COPYUID 1 7 42] moved\r\n".into(),
+                    "OK MOVE done".into(),
+                )
+            } else if upper.starts_with("UID COPY ") {
+                (String::new(), "OK [COPYUID 1 7 42] COPY done".into())
+            } else if upper.starts_with("UID EXPUNGE ") {
+                if self.cfg.fail_expunge {
+                    (String::new(), "NO expunge failed".into())
+                } else {
+                    ("* 1 EXPUNGE\r\n".into(), "OK EXPUNGE done".into())
+                }
+            } else {
+                (String::new(), "BAD unsupported in mock".into())
+            }
+        }
+    }
+
+    impl Read for ScriptedImap {
+        fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
+            let available = &self.out[self.out_pos..];
+            let n = available.len().min(buf.len());
+            buf[..n].copy_from_slice(&available[..n]);
+            self.out_pos += n;
+            Ok(n)
+        }
+    }
+
+    impl Write for ScriptedImap {
+        fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
+            self.pending.extend_from_slice(buf);
+            while let Some(pos) = self.pending.windows(2).position(|w| w == b"\r\n") {
+                let line = String::from_utf8(self.pending.drain(..pos + 2).collect()).unwrap();
+                let line = line.trim_end().to_string();
+                let (tag, command) = line.split_once(' ').unwrap();
+                self.commands.lock().unwrap().push(command.to_string());
+                let (untagged, status) = self.respond(command);
+                self.out.extend_from_slice(untagged.as_bytes());
+                self.out
+                    .extend_from_slice(format!("{tag} {status}\r\n").as_bytes());
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> IoResult<()> {
+            Ok(())
+        }
+    }
+
+    fn session(cfg: MockCfg) -> (ImapSession<ScriptedImap>, Arc<Mutex<Vec<String>>>) {
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let flags = cfg
+            .initial_flags
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        let stream = ScriptedImap {
+            cfg,
+            flags,
+            pending: Vec::new(),
+            out: Vec::new(),
+            out_pos: 0,
+            commands: commands.clone(),
+        };
+        (ImapSession::from_stream(stream), commands)
+    }
+
+    fn mutating(commands: &[String]) -> Vec<String> {
+        commands
+            .iter()
+            .filter(|c| {
+                let u = c.to_ascii_uppercase();
+                u.contains("STORE")
+                    || u.contains("MOVE")
+                    || u.contains("COPY")
+                    || u.contains("EXPUNGE")
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn mark(seen: Option<bool>, flagged: Option<bool>, uid: u64) -> MailMarkRequest {
+        MailMarkRequest { uid, seen, flagged }
+    }
+
+    #[test]
+    fn mark_seen_true_stores_seen_flag_after_select() {
+        let (mut s, commands) = session(MockCfg::default());
+        let result = mark_in_session(&mut s, "INBOX", &mark(Some(true), None, SRC_UID), false)
+            .expect("mark");
+        assert!(result.flags_before.is_empty());
+        assert_eq!(result.flags_after, vec!["\\Seen".to_string()]);
+        let commands = commands.lock().unwrap().clone();
+        assert!(commands.iter().any(|c| c.starts_with("SELECT ")));
+        assert!(!commands.iter().any(|c| c.starts_with("EXAMINE")));
+        assert_eq!(
+            mutating(&commands),
+            vec!["UID STORE 7 +FLAGS.SILENT (\\Seen)".to_string()]
+        );
+    }
+
+    #[test]
+    fn mark_seen_false_and_unflag_remove_flags() {
+        let (mut s, commands) = session(MockCfg {
+            initial_flags: "\\Seen \\Flagged",
+            ..MockCfg::default()
+        });
+        let result = mark_in_session(
+            &mut s,
+            "INBOX",
+            &mark(Some(false), Some(false), SRC_UID),
+            false,
+        )
+        .expect("mark");
+        assert_eq!(result.flags_before, vec!["\\Seen", "\\Flagged"]);
+        assert!(result.flags_after.is_empty());
+        let stores = mutating(&commands.lock().unwrap());
+        assert_eq!(
+            stores,
+            vec![
+                "UID STORE 7 -FLAGS.SILENT (\\Seen \\Flagged)".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn mark_seen_and_flag_in_one_call_uses_add_then_remove() {
+        let (mut s, commands) = session(MockCfg {
+            initial_flags: "\\Flagged",
+            ..MockCfg::default()
+        });
+        let result = mark_in_session(
+            &mut s,
+            "INBOX",
+            &mark(Some(true), Some(false), SRC_UID),
+            false,
+        )
+        .expect("mark");
+        assert_eq!(result.flags_after, vec!["\\Seen".to_string()]);
+        assert_eq!(
+            mutating(&commands.lock().unwrap()),
+            vec![
+                "UID STORE 7 +FLAGS.SILENT (\\Seen)".to_string(),
+                "UID STORE 7 -FLAGS.SILENT (\\Flagged)".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn mark_missing_uid_fails_without_store() {
+        let (mut s, commands) = session(MockCfg::default());
+        let err = mark_in_session(&mut s, "INBOX", &mark(Some(true), None, 999), false)
+            .expect_err("missing uid");
+        assert!(matches!(err, YacliError::Validation(_)), "{err}");
+        assert!(mutating(&commands.lock().unwrap()).is_empty());
+    }
+
+    #[test]
+    fn mark_rejects_readonly_mailbox() {
+        let (mut s, commands) = session(MockCfg {
+            readonly: true,
+            ..MockCfg::default()
+        });
+        let err = mark_in_session(&mut s, "INBOX", &mark(Some(true), None, SRC_UID), false)
+            .expect_err("readonly");
+        assert!(err.to_string().contains("только для чтения"), "{err}");
+        assert!(mutating(&commands.lock().unwrap()).is_empty());
+    }
+
+    #[test]
+    fn mark_dry_run_sends_only_read_only_commands() {
+        let (mut s, commands) = session(MockCfg::default());
+        let result = mark_in_session(&mut s, "INBOX", &mark(Some(true), None, SRC_UID), true)
+            .expect("dry run");
+        assert_eq!(result.flags_after, vec!["\\Seen".to_string()]);
+        assert!(mutating(&commands.lock().unwrap()).is_empty());
+    }
+
+    #[test]
+    fn move_uses_uid_move_when_server_has_move() {
+        let (mut s, commands) = session(MockCfg::default());
+        let result = move_in_session(
+            &mut s,
+            "INBOX",
+            SRC_UID,
+            MailMoveTarget::Folder(ARCHIVE),
+            false,
+        )
+        .expect("move");
+        assert_eq!(result.new_uid, Some(42));
+        assert_eq!(result.method, "move");
+        assert_eq!(result.to, ARCHIVE);
+        assert_eq!(
+            mutating(&commands.lock().unwrap()),
+            vec![format!(
+                "UID MOVE 7 \"{}\"",
+                encode_modified_utf7(ARCHIVE)
+            )]
+        );
+    }
+
+    #[test]
+    fn move_accepts_raw_modified_utf7_folder_name() {
+        let (mut s, commands) = session(MockCfg::default());
+        let raw = encode_modified_utf7(ARCHIVE);
+        move_in_session(&mut s, "INBOX", SRC_UID, MailMoveTarget::Folder(&raw), false)
+            .expect("move");
+        assert_eq!(mutating(&commands.lock().unwrap()).len(), 1);
+    }
+
+    #[test]
+    fn move_falls_back_to_copy_store_uid_expunge_with_uidplus() {
+        let (mut s, commands) = session(MockCfg {
+            caps: "IMAP4rev1 UIDPLUS",
+            ..MockCfg::default()
+        });
+        let result = move_in_session(
+            &mut s,
+            "INBOX",
+            SRC_UID,
+            MailMoveTarget::Folder(ARCHIVE),
+            false,
+        )
+        .expect("move");
+        assert_eq!(result.method, "copy_expunge");
+        assert_eq!(result.new_uid, Some(42));
+        let commands = commands.lock().unwrap().clone();
+        assert_eq!(
+            mutating(&commands),
+            vec![
+                format!("UID COPY 7 \"{}\"", encode_modified_utf7(ARCHIVE)),
+                "UID STORE 7 +FLAGS.SILENT (\\Deleted)".to_string(),
+                "UID EXPUNGE 7".to_string(),
+            ]
+        );
+        assert!(!commands.iter().any(|c| c == "EXPUNGE"));
+    }
+
+    #[test]
+    fn move_without_move_and_uidplus_is_refused_without_any_mutation() {
+        let (mut s, commands) = session(MockCfg {
+            caps: "IMAP4rev1",
+            ..MockCfg::default()
+        });
+        let err = move_in_session(
+            &mut s,
+            "INBOX",
+            SRC_UID,
+            MailMoveTarget::Folder(ARCHIVE),
+            false,
+        )
+        .expect_err("unsupported");
+        assert!(matches!(err, YacliError::UnsupportedOperation(_)), "{err}");
+        assert!(err.to_string().contains("безопасное перемещение"));
+        assert!(mutating(&commands.lock().unwrap()).is_empty());
+    }
+
+    #[test]
+    fn failed_expunge_after_copy_reports_copy_and_clears_deleted_flag() {
+        let (mut s, commands) = session(MockCfg {
+            caps: "IMAP4rev1 UIDPLUS",
+            fail_expunge: true,
+            ..MockCfg::default()
+        });
+        let err = move_in_session(
+            &mut s,
+            "INBOX",
+            SRC_UID,
+            MailMoveTarget::Folder(ARCHIVE),
+            false,
+        )
+        .expect_err("expunge failure");
+        assert!(err.to_string().contains("скопировано"), "{err}");
+        let commands = commands.lock().unwrap().clone();
+        assert_eq!(
+            commands.last().map(String::as_str),
+            Some("UID STORE 7 -FLAGS.SILENT (\\Deleted)")
+        );
+    }
+
+    #[test]
+    fn move_to_missing_folder_fails_before_any_mutation() {
+        let (mut s, commands) = session(MockCfg::default());
+        let err = move_in_session(
+            &mut s,
+            "INBOX",
+            SRC_UID,
+            MailMoveTarget::Folder("Нет такой"),
+            false,
+        )
+        .expect_err("missing folder");
+        assert!(matches!(err, YacliError::Validation(_)), "{err}");
+        assert!(mutating(&commands.lock().unwrap()).is_empty());
+    }
+
+    #[test]
+    fn move_to_same_folder_is_refused() {
+        let (mut s, commands) = session(MockCfg::default());
+        let err = move_in_session(
+            &mut s,
+            "INBOX",
+            SRC_UID,
+            MailMoveTarget::Folder("INBOX"),
+            false,
+        )
+        .expect_err("same folder");
+        assert!(err.to_string().contains("ту же папку"), "{err}");
+        assert!(mutating(&commands.lock().unwrap()).is_empty());
+    }
+
+    #[test]
+    fn move_missing_uid_fails_without_mutation() {
+        let (mut s, commands) = session(MockCfg::default());
+        let err = move_in_session(&mut s, "INBOX", 999, MailMoveTarget::Folder(ARCHIVE), false)
+            .expect_err("missing uid");
+        assert!(matches!(err, YacliError::Validation(_)), "{err}");
+        assert!(mutating(&commands.lock().unwrap()).is_empty());
+    }
+
+    #[test]
+    fn trash_finds_folder_by_trash_attribute() {
+        let (mut s, commands) = session(MockCfg::default());
+        let result =
+            move_in_session(&mut s, "INBOX", SRC_UID, MailMoveTarget::Trash, false).expect("trash");
+        assert_eq!(result.to, TRASH);
+        assert_eq!(
+            mutating(&commands.lock().unwrap()),
+            vec![format!("UID MOVE 7 \"{}\"", encode_modified_utf7(TRASH))]
+        );
+    }
+
+    #[test]
+    fn trash_for_message_already_in_trash_is_refused() {
+        let (mut s, commands) = session(MockCfg::default());
+        let err = move_in_session(&mut s, TRASH, SRC_UID, MailMoveTarget::Trash, false)
+            .expect_err("already in trash");
+        assert!(err.to_string().contains("уже в корзине"), "{err}");
+        assert!(mutating(&commands.lock().unwrap()).is_empty());
+    }
+
+    #[test]
+    fn trash_without_trash_folder_is_an_error() {
+        let (mut s, commands) = session(MockCfg {
+            with_trash: false,
+            ..MockCfg::default()
+        });
+        let err = move_in_session(&mut s, "INBOX", SRC_UID, MailMoveTarget::Trash, false)
+            .expect_err("no trash");
+        assert!(err.to_string().contains("корзины"), "{err}");
+        assert!(mutating(&commands.lock().unwrap()).is_empty());
+    }
+
+    #[test]
+    fn move_and_trash_dry_run_send_only_read_only_commands() {
+        for target in [MailMoveTarget::Folder(ARCHIVE), MailMoveTarget::Trash] {
+            for caps in ["IMAP4rev1 MOVE", "IMAP4rev1 UIDPLUS"] {
+                let (mut s, commands) = session(MockCfg {
+                    caps,
+                    ..MockCfg::default()
+                });
+                let result =
+                    move_in_session(&mut s, "INBOX", SRC_UID, target, true).expect("dry run");
+                assert_eq!(result.new_uid, None);
+                assert!(mutating(&commands.lock().unwrap()).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn parse_copyuid_extracts_single_destination_uid() {
+        assert_eq!(parse_copyuid("A0005 OK [COPYUID 1 7 42] done"), Some(42));
+        assert_eq!(parse_copyuid("* OK [COPYUID 38505 304 3956]"), Some(3956));
+        assert_eq!(parse_copyuid("* OK [COPYUID 1 7:9 42:44] x"), None);
+        assert_eq!(parse_copyuid("A0005 OK done"), None);
     }
 }

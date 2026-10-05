@@ -4917,4 +4917,3 @@ fn mcp_http_goal_route_tool_matches_invite_workflow_for_russian_goal() {
     );
     assert!(payload["result"]["structuredContent"]["remediation"].is_object());
 }
-

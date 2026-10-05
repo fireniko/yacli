@@ -1364,11 +1364,15 @@ fn execute_auth(format: OutputFormat, action: AuthCommand) -> Result<RenderedOut
                 };
             let app_password_service: Option<&'static str> = match requested_service {
                 Some(AuthServiceArg::Calendar) => Some("calendar"),
+                // OAuth-only flags keep the old behavior (rejected by the OAuth path).
                 Some(AuthServiceArg::Mail)
-                    if matches!(
-                        account_store.get_account(&account_name)?.mail.auth_mode,
-                        MailAuthMode::AppPassword
-                    ) =>
+                    if client_id.is_none()
+                        && code.is_none()
+                        && login_hint.is_none()
+                        && matches!(
+                            account_store.get_account(&account_name)?.mail.auth_mode,
+                            MailAuthMode::AppPassword
+                        ) =>
                 {
                     Some("mail")
                 }

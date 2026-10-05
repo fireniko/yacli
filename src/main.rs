@@ -5,7 +5,23 @@ use yacli::commands::execute;
 use yacli::mcp::server::{serve_http, serve_stdio};
 use yacli::output::emit;
 
+/// Дерево команд clap большое: в отладочной сборке на Windows (главный поток
+/// получает только 1 МБ стека) разбор аргументов переполняет стек, поэтому
+/// всё выполняется в потоке с запасом.
+const MAIN_STACK_BYTES: usize = 32 * 1024 * 1024;
+
 fn main() {
+    let worker = std::thread::Builder::new()
+        .name("yacli-main".to_string())
+        .stack_size(MAIN_STACK_BYTES)
+        .spawn(run)
+        .expect("failed to spawn the main worker thread");
+    if worker.join().is_err() {
+        process::exit(101);
+    }
+}
+
+fn run() {
     let cli = parse_cli();
     if let Command::Mcp {
         transport,

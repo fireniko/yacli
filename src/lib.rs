@@ -15,6 +15,7 @@ mod mail;
 mod mail_invite_flow;
 mod mail_link;
 pub mod mcp;
+pub mod net_policy;
 pub mod model;
 pub mod next_actions;
 mod oauth;

@@ -5,6 +5,10 @@ use url::Url;
 
 use crate::error::{Result, YacliError};
 use crate::model::{AccountConfig, AccountsFile};
+use crate::net_policy::{
+    CALDAV_HOSTS, DISK_API_HOSTS, IMAP_HOSTS, IMAP_PORT, SMTP_HOSTS, SMTP_PORT,
+    test_overrides_enabled, validate_https_url_strict, validate_mail_endpoint_strict,
+};
 use crate::paths::accounts_path;
 use crate::persist::write_config_file;
 
@@ -24,6 +28,15 @@ impl AccountStore {
 
         let content = fs::read_to_string(path)?;
         let file = toml::from_str::<AccountsFile>(&content)?;
+        for (name, account) in &file.accounts {
+            let errors = endpoint_errors(account, !test_overrides_enabled());
+            if !errors.is_empty() {
+                return Err(YacliError::Config(format!(
+                    "account `{name}` uses endpoints outside the Yandex allow-list: {}",
+                    errors.join("; ")
+                )));
+            }
+        }
         Ok(Self { file })
     }
 
@@ -207,8 +220,103 @@ pub fn validate_account(name: &str, account: &AccountConfig) -> ValidationReport
         errors.push("calendar.credential_ref must use env:NAME or store:SERVICE".to_string());
     }
 
+    errors.extend(endpoint_errors(account, !test_overrides_enabled()));
+
     ValidationReport {
         valid: errors.is_empty(),
         errors,
+    }
+}
+
+/// Returns one message per endpoint in `account` that is not an allow-listed
+/// Yandex host. With `strict == false` (debug/test builds only) nothing is reported.
+pub(crate) fn endpoint_errors(account: &AccountConfig, strict: bool) -> Vec<String> {
+    if !strict {
+        return Vec::new();
+    }
+    let mut errors = Vec::new();
+    let mut note = |result: crate::error::Result<()>| {
+        if let Err(err) = result {
+            errors.push(err.to_string());
+        }
+    };
+    note(validate_mail_endpoint_strict(
+        "mail.imap_host",
+        &account.mail.imap_host,
+        account.mail.imap_port,
+        IMAP_HOSTS,
+        IMAP_PORT,
+    ));
+    note(validate_mail_endpoint_strict(
+        "mail.smtp_host",
+        &account.mail.smtp_host,
+        account.mail.smtp_port,
+        SMTP_HOSTS,
+        SMTP_PORT,
+    ));
+    note(
+        validate_https_url_strict(
+            "calendar.caldav_base_url",
+            &account.calendar.caldav_base_url,
+            CALDAV_HOSTS,
+        )
+        .map(|_| ()),
+    );
+    note(
+        validate_https_url_strict(
+            "disk.rest_base_url",
+            &account.disk.rest_base_url,
+            DISK_API_HOSTS,
+        )
+        .map(|_| ()),
+    );
+    errors
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::{CalendarAuthModeArg, DiskAuthModeArg, MailAuthModeArg};
+    use crate::model::NewAccountInput;
+
+    fn default_account() -> AccountConfig {
+        AccountConfig::new(NewAccountInput {
+            email: "me@yandex.ru".to_string(),
+            default: true,
+            mail_auth_mode: MailAuthModeArg::OauthXoauth2.into(),
+            calendar_auth_mode: CalendarAuthModeArg::AppPassword.into(),
+            disk_auth_mode: DiskAuthModeArg::Oauth.into(),
+            mail_credential_ref: None,
+            calendar_credential_ref: None,
+            disk_credential_ref: None,
+        })
+    }
+
+    #[test]
+    fn default_account_passes_strict_endpoint_validation() {
+        assert!(endpoint_errors(&default_account(), true).is_empty());
+    }
+
+    #[test]
+    fn foreign_hosts_in_account_config_are_rejected() {
+        let mut account = default_account();
+        account.mail.imap_host = "imap.evil.example".to_string();
+        account.mail.smtp_host = "127.0.0.1".to_string();
+        account.calendar.caldav_base_url = "http://caldav.yandex.ru".to_string();
+        account.disk.rest_base_url = "https://cloud-api.evil.example".to_string();
+
+        let errors = endpoint_errors(&account, true);
+        assert_eq!(errors.len(), 4, "{errors:?}");
+        assert!(errors.iter().any(|e| e.contains("imap.evil.example")));
+        assert!(errors.iter().any(|e| e.contains("127.0.0.1")));
+        assert!(errors.iter().any(|e| e.contains("only https")));
+        assert!(errors.iter().any(|e| e.contains("cloud-api.evil.example")));
+    }
+
+    #[test]
+    fn non_strict_mode_reports_nothing_for_test_mock_servers() {
+        let mut account = default_account();
+        account.disk.rest_base_url = "http://127.0.0.1:9999".to_string();
+        assert!(endpoint_errors(&account, false).is_empty());
     }
 }

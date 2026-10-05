@@ -74,7 +74,12 @@ pub struct LoginResult {
 }
 
 pub fn oauth_base_url() -> String {
-    std::env::var("YACLI_OAUTH_BASE_URL").unwrap_or_else(|_| DEFAULT_OAUTH_BASE_URL.to_string())
+    // Test-only override: compiled out of release builds (see net_policy).
+    #[cfg(debug_assertions)]
+    if let Ok(value) = std::env::var("YACLI_OAUTH_BASE_URL") {
+        return value;
+    }
+    DEFAULT_OAUTH_BASE_URL.to_string()
 }
 
 pub const fn default_yacli_client_id() -> &'static str {
@@ -183,13 +188,13 @@ fn build_http_client() -> Result<Client> {
     Client::builder()
         .user_agent(format!("yacli/{}", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(Into::into)
 }
 
 fn oauth_endpoint(base_url: &str, path: &str) -> Result<Url> {
-    Url::parse(base_url)
-        .map_err(|err| YacliError::Config(format!("invalid OAuth base URL: {err}")))?
+    crate::net_policy::parse_endpoint("OAuth base URL", base_url, crate::net_policy::OAUTH_HOSTS)?
         .join(path)
         .map_err(|err| YacliError::Config(format!("invalid OAuth endpoint: {err}")))
 }

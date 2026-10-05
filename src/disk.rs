@@ -1232,50 +1232,71 @@ fn finalize_partial_download(partial_path: &Path, output: &Path, force: bool) ->
 }
 
 fn public_resource_endpoint(base_url: &str) -> Result<Url> {
-    Url::parse(base_url)
-        .map_err(|err| YacliError::Config(format!("invalid disk base URL: {err}")))?
+    crate::net_policy::parse_endpoint(
+        "disk base URL",
+        base_url,
+        crate::net_policy::DISK_API_HOSTS,
+    )?
         .join("/v1/disk/public/resources")
         .map_err(|err| YacliError::Config(format!("invalid disk endpoint: {err}")))
 }
 
 fn disk_resources_endpoint(base_url: &str) -> Result<Url> {
-    Url::parse(base_url)
-        .map_err(|err| YacliError::Config(format!("invalid disk base URL: {err}")))?
+    crate::net_policy::parse_endpoint(
+        "disk base URL",
+        base_url,
+        crate::net_policy::DISK_API_HOSTS,
+    )?
         .join("/v1/disk/resources")
         .map_err(|err| YacliError::Config(format!("invalid disk endpoint: {err}")))
 }
 
 fn disk_upload_endpoint(base_url: &str) -> Result<Url> {
-    Url::parse(base_url)
-        .map_err(|err| YacliError::Config(format!("invalid disk base URL: {err}")))?
+    crate::net_policy::parse_endpoint(
+        "disk base URL",
+        base_url,
+        crate::net_policy::DISK_API_HOSTS,
+    )?
         .join("/v1/disk/resources/upload")
         .map_err(|err| YacliError::Config(format!("invalid disk endpoint: {err}")))
 }
 
 fn disk_download_endpoint(base_url: &str) -> Result<Url> {
-    Url::parse(base_url)
-        .map_err(|err| YacliError::Config(format!("invalid disk base URL: {err}")))?
+    crate::net_policy::parse_endpoint(
+        "disk base URL",
+        base_url,
+        crate::net_policy::DISK_API_HOSTS,
+    )?
         .join("/v1/disk/resources/download")
         .map_err(|err| YacliError::Config(format!("invalid disk endpoint: {err}")))
 }
 
 fn disk_publish_endpoint(base_url: &str) -> Result<Url> {
-    Url::parse(base_url)
-        .map_err(|err| YacliError::Config(format!("invalid disk base URL: {err}")))?
+    crate::net_policy::parse_endpoint(
+        "disk base URL",
+        base_url,
+        crate::net_policy::DISK_API_HOSTS,
+    )?
         .join("/v1/disk/resources/publish")
         .map_err(|err| YacliError::Config(format!("invalid disk endpoint: {err}")))
 }
 
 fn disk_unpublish_endpoint(base_url: &str) -> Result<Url> {
-    Url::parse(base_url)
-        .map_err(|err| YacliError::Config(format!("invalid disk base URL: {err}")))?
+    crate::net_policy::parse_endpoint(
+        "disk base URL",
+        base_url,
+        crate::net_policy::DISK_API_HOSTS,
+    )?
         .join("/v1/disk/resources/unpublish")
         .map_err(|err| YacliError::Config(format!("invalid disk endpoint: {err}")))
 }
 
 fn disk_info_endpoint(base_url: &str) -> Result<Url> {
-    Url::parse(base_url)
-        .map_err(|err| YacliError::Config(format!("invalid disk base URL: {err}")))?
+    crate::net_policy::parse_endpoint(
+        "disk base URL",
+        base_url,
+        crate::net_policy::DISK_API_HOSTS,
+    )?
         .join("/v1/disk")
         .map_err(|err| YacliError::Config(format!("invalid disk endpoint: {err}")))
 }

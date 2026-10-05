@@ -737,6 +737,7 @@ enum TaggedErrorKind {
 
 impl SmtpSession<native_tls::TlsStream<TcpStream>> {
     fn connect(smtp_host: &str, smtp_port: u16) -> Result<Self> {
+        crate::net_policy::check_smtp_endpoint(smtp_host, smtp_port)?;
         let address = format!("{smtp_host}:{smtp_port}");
         let tcp = TcpStream::connect(&address).map_err(|err| {
             YacliError::Network(format!("failed to connect to SMTP server {address}: {err}"))
@@ -759,6 +760,7 @@ impl SmtpSession<native_tls::TlsStream<TcpStream>> {
 
 impl ImapSession {
     fn connect(imap_host: &str, imap_port: u16) -> Result<Self> {
+        crate::net_policy::check_imap_endpoint(imap_host, imap_port)?;
         let address = format!("{imap_host}:{imap_port}");
         let tcp = TcpStream::connect(&address).map_err(|err| {
             YacliError::Network(format!("failed to connect to IMAP server {address}: {err}"))

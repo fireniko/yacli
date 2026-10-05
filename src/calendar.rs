@@ -313,8 +313,11 @@ struct CaldavClient {
 
 impl CaldavClient {
     fn new(base_url: &str, account: &str, app_password: &str) -> Result<Self> {
-        let base_url = Url::parse(base_url)
-            .map_err(|err| YacliError::Config(format!("invalid CalDAV base URL: {err}")))?;
+        let base_url = crate::net_policy::parse_endpoint(
+            "CalDAV base URL",
+            base_url,
+            crate::net_policy::CALDAV_HOSTS,
+        )?;
         let http = Client::builder()
             .user_agent(format!("yacli/{}", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(CALDAV_TIMEOUT_SECS))
@@ -726,9 +729,15 @@ impl CaldavClient {
     }
 
     fn resolve_href(&self, href: &str) -> Result<Url> {
-        self.base_url
+        let joined = self
+            .base_url
             .join(href)
-            .map_err(|err| YacliError::Config(format!("invalid CalDAV href `{href}`: {err}")))
+            .map_err(|err| YacliError::Config(format!("invalid CalDAV href `{href}`: {err}")))?;
+        crate::net_policy::parse_endpoint(
+            "CalDAV href",
+            joined.as_str(),
+            crate::net_policy::CALDAV_HOSTS,
+        )
     }
 }
 

@@ -143,6 +143,26 @@ fn redact_replay_command(operation: &str, replay_command: String) -> String {
     format!("yacli {words} <аргументы>")
 }
 
+/// Запись журнала для операций управления письмами. Сводка нейтральная: без
+/// темы, адресов и имён папок (имена папок тоже считаются содержимым).
+pub fn mail_management_entry(source: &str, operation: &str, account: &str) -> NewActivityEntry {
+    let summary = match operation {
+        "mail.mark" => "Письмо помечено",
+        "mail.move" => "Письмо перемещено в другую папку",
+        "mail.trash" => "Письмо перемещено в корзину",
+        _ => "Операция с письмом",
+    };
+    let words = operation.replace('_', "-").replace('.', " ");
+    NewActivityEntry {
+        source: source.to_string(),
+        operation: operation.to_string(),
+        account: account.to_string(),
+        summary: summary.to_string(),
+        replay_command: format!("yacli {words} <аргументы>"),
+        undo: None,
+    }
+}
+
 pub fn record_activity(new_entry: NewActivityEntry) -> Result<ActivityEntry> {
     let mut store = ActivityStore::load()?;
     let entry = store.append(new_entry);
@@ -251,5 +271,28 @@ replay_command = "yacli mail send a@example.com тема текст"
         let file: ActivityFile = toml::from_str(legacy).unwrap();
         assert_eq!(file.entries.len(), 1);
         assert!(file.entries[0].summary.contains("a@example.com"));
+    }
+
+    #[test]
+    fn mail_management_entries_are_neutral_and_redacted() {
+        for (op, summary) in [
+            ("mail.mark", "Письмо помечено"),
+            ("mail.move", "Письмо перемещено в другую папку"),
+            ("mail.trash", "Письмо перемещено в корзину"),
+        ] {
+            let mut new_entry = mail_management_entry("cli", op, "main");
+            assert_eq!(new_entry.summary, summary);
+            // Даже если вызывающий код по ошибке передаст содержимое, шаблон его вытеснит.
+            new_entry.replay_command =
+                "yacli mail move 7 --to 'MARKER_FOLDER' --folder 'MARKER_SUBJECT'".to_string();
+            let mut store = ActivityStore {
+                file: ActivityFile::default(),
+            };
+            let entry = store.append(new_entry);
+            let toml = toml::to_string_pretty(&store.file).unwrap();
+            assert!(!toml.contains("MARKER"), "{toml}");
+            assert!(entry.undo.is_none());
+            assert!(entry.replay_command.ends_with("<аргументы>"));
+        }
     }
 }

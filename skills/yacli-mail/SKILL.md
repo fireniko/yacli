@@ -65,6 +65,16 @@ yacli mail forward UID КОМУ [ТЕКСТ] [--folder FOLDER] [--cc EMAIL]... [
 
 Пересылает письмо с оригинальным содержимым.
 
+### Пометки, перемещение, корзина
+
+```
+yacli mail mark UID [--seen true|false] [--flagged true|false] [--folder FOLDER] [--dry-run] [--account ALIAS]
+yacli mail move UID ПАПКА_НАЗНАЧЕНИЯ [--folder FOLDER] [--dry-run] [--account ALIAS]
+yacli mail trash UID [--folder FOLDER] [--dry-run] [--account ALIAS]
+```
+
+`mark` меняет только флаги. `move` перекладывает письмо в существующую папку (папки не создаются). `trash` перекладывает в корзину; безвозвратного удаления нет. Сначала запускайте с `--dry-run`.
+
 ## Типичный порядок работы
 
 1. `yacli mail list` — просмотреть входящие, запомнить UID

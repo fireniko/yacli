@@ -23,7 +23,9 @@ use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
 use url::Url;
 
 use crate::account_store::AccountStore;
-use crate::activity_store::{ActivityStore, NewActivityEntry, record_activity};
+use crate::activity_store::{
+    ActivityStore, NewActivityEntry, mail_management_entry, record_activity,
+};
 use crate::activity_undo::{apply_activity_undo, calendar_create_undo, disk_publish_undo};
 use crate::commands::{apply_safe_doctor_remediation, doctor_safe_remediation_activity_entry};
 use crate::credential_store::CredentialStore;
@@ -64,9 +66,10 @@ use crate::{
     },
     mail::{
         MailAttachmentExportRequest, MailAttachmentSelector, MailInviteInspectRequest,
-        export_mail_attachment, inspect_mail_invite, list_mail_folders, list_mail_messages,
-        load_mail_attachments, read_mail_message, review_mail_submission, search_mail_messages,
-        send_mail_message,
+        MailMarkRequest, MailMoveTarget, export_mail_attachment, inspect_mail_invite,
+        list_mail_folders, list_mail_messages, load_mail_attachments, mail_change_payload,
+        mark_mail_message, move_mail_message, read_mail_message, review_mail_submission,
+        search_mail_messages, send_mail_message,
     },
 };
 use chrono::{DateTime, Utc};
@@ -1135,6 +1138,68 @@ fn handle_request(
     }
 }
 
+/// Вынесено из `tool_definitions`: один гигантский `json!`-массив раздувает
+/// стек отладочной сборки (на Windows главный поток — 1 МБ).
+#[inline(never)]
+fn mail_management_tool_definitions(ui_enabled: bool) -> Vec<Value> {
+    vec![
+        tool(
+            "yacli.mail.mark",
+            "Mark one message as read/unread and/or flagged/unflagged by UID. Changes only flags, never content. At least one of seen/flagged is required.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "account": { "type": "string" },
+                    "folder": { "type": "string" },
+                    "uid": { "type": "integer", "minimum": 1 },
+                    "seen": { "type": "boolean" },
+                    "flagged": { "type": "boolean" },
+                    "dry_run": { "type": "boolean" }
+                },
+                "required": ["uid"],
+                "additionalProperties": false
+            }),
+            None,
+            ui_enabled,
+        ),
+        tool(
+            "yacli.mail.move",
+            "Move one message by UID to another existing folder (folder name as shown by yacli.mail.folders). Never creates folders and never deletes mail.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "account": { "type": "string" },
+                    "folder": { "type": "string" },
+                    "uid": { "type": "integer", "minimum": 1 },
+                    "to": { "type": "string" },
+                    "dry_run": { "type": "boolean" }
+                },
+                "required": ["uid", "to"],
+                "additionalProperties": false
+            }),
+            None,
+            ui_enabled,
+        ),
+        tool(
+            "yacli.mail.trash",
+            "Move one message by UID to the Trash folder (recoverable). Permanent deletion is not supported.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "account": { "type": "string" },
+                    "folder": { "type": "string" },
+                    "uid": { "type": "integer", "minimum": 1 },
+                    "dry_run": { "type": "boolean" }
+                },
+                "required": ["uid"],
+                "additionalProperties": false
+            }),
+            None,
+            ui_enabled,
+        ),
+    ]
+}
+
 fn tool_definitions(ui_enabled: bool, roots_enabled: bool) -> Vec<Value> {
     let mut tools = Vec::new();
     if ui_enabled {
@@ -1704,6 +1769,7 @@ fn tool_definitions(ui_enabled: bool, roots_enabled: bool) -> Vec<Value> {
         ),
     ]);
 
+    tools.extend(mail_management_tool_definitions(ui_enabled));
     tools
 }
 
@@ -1845,6 +1911,30 @@ fn call_tool(params: Value, ui_enabled: bool) -> Result<Value> {
                 max_source_bytes: optional_u64(&arguments, "max_source_bytes")
                     .unwrap_or(15 * 1024 * 1024),
             },
+        )?,
+        "yacli.mail.mark" => mail_mark(
+            arguments.get("account").and_then(Value::as_str),
+            optional_string(&arguments, "folder").unwrap_or("INBOX"),
+            MailMarkRequest {
+                uid: required_u64(&arguments, "uid")?,
+                seen: optional_bool(&arguments, "seen"),
+                flagged: optional_bool(&arguments, "flagged"),
+            },
+            optional_bool(&arguments, "dry_run").unwrap_or(false),
+        )?,
+        "yacli.mail.move" => mail_move(
+            arguments.get("account").and_then(Value::as_str),
+            optional_string(&arguments, "folder").unwrap_or("INBOX"),
+            required_u64(&arguments, "uid")?,
+            MailMoveTarget::Folder(required_string(&arguments, "to")?),
+            optional_bool(&arguments, "dry_run").unwrap_or(false),
+        )?,
+        "yacli.mail.trash" => mail_move(
+            arguments.get("account").and_then(Value::as_str),
+            optional_string(&arguments, "folder").unwrap_or("INBOX"),
+            required_u64(&arguments, "uid")?,
+            MailMoveTarget::Trash,
+            optional_bool(&arguments, "dry_run").unwrap_or(false),
         )?,
         "yacli.mail.attachment.export" => mail_attachment_export(
             arguments.get("account").and_then(Value::as_str),
@@ -2803,6 +2893,55 @@ fn mail_forward(account: Option<&str>, request: MailForwardToolRequest) -> Resul
         "folder": request.folder,
         "forward": forward,
     }))
+}
+
+fn mail_mark(
+    account: Option<&str>,
+    folder: &str,
+    request: MailMarkRequest,
+    dry_run: bool,
+) -> Result<Value> {
+    let (resolved_account, auth, context) = resolve_mail_private_context(account)?;
+    let result = mark_mail_message(
+        &context.imap_host,
+        context.imap_port,
+        auth,
+        folder,
+        &request,
+        dry_run,
+    )?;
+    if !dry_run {
+        record_activity_mcp(mail_management_entry("mcp", "mail.mark", &resolved_account));
+    }
+    Ok(mail_change_payload(&resolved_account, dry_run, &result))
+}
+
+/// Общий обработчик `yacli.mail.move` и `yacli.mail.trash`.
+fn mail_move(
+    account: Option<&str>,
+    folder: &str,
+    uid: u64,
+    target: MailMoveTarget<'_>,
+    dry_run: bool,
+) -> Result<Value> {
+    let (resolved_account, auth, context) = resolve_mail_private_context(account)?;
+    let result = move_mail_message(
+        &context.imap_host,
+        context.imap_port,
+        auth,
+        folder,
+        uid,
+        target,
+        dry_run,
+    )?;
+    if !dry_run {
+        let operation = match target {
+            MailMoveTarget::Trash => "mail.trash",
+            MailMoveTarget::Folder(_) => "mail.move",
+        };
+        record_activity_mcp(mail_management_entry("mcp", operation, &resolved_account));
+    }
+    Ok(mail_change_payload(&resolved_account, dry_run, &result))
 }
 
 fn mail_attachment_export(

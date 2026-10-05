@@ -7215,3 +7215,91 @@ fn account_set_mail_auth_switches_mode_and_clears_old_ref() {
         .assert()
         .success();
 }
+
+fn write_mock_mail_credentials(dir: &std::path::Path) {
+    write_mock_account_with_refs(
+        dir,
+        "https://cloud-api.yandex.net",
+        "oauth_xoauth2",
+        Some("store:mail"),
+        None,
+    );
+    write_credentials_file(
+        dir,
+        r#"
+version = 1
+
+[accounts.mock.services.mail]
+kind = "oauth_pkce"
+access_token = "mail-token"
+token_type = "bearer"
+expires_at_epoch_secs = 4102444800
+scope = ["mail:imap_full", "mail:smtp"]
+client_id = "client-123"
+"#,
+    );
+}
+
+#[test]
+fn mail_management_help_describes_mark_move_trash() {
+    yacli()
+        .args(["mail", "mark", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "yacli mail mark [OPTIONS] <ID>",
+        ))
+        .stdout(predicate::str::contains("--seen <true|false>"))
+        .stdout(predicate::str::contains("--flagged <true|false>"));
+    yacli()
+        .args(["mail", "move", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "yacli mail move [OPTIONS] <ID> <ПАПКА_НАЗНАЧЕНИЯ>",
+        ));
+    yacli()
+        .args(["mail", "trash", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("yacli mail trash [OPTIONS] <ID>"));
+}
+
+#[test]
+fn mail_mark_requires_seen_or_flagged_before_network() {
+    let temp = tempdir().expect("tempdir");
+    write_mock_mail_credentials(temp.path());
+
+    yacli()
+        .env("YACLI_CONFIG_DIR", temp.path())
+        .args(["mail", "mark", "--account", "mock", "5"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("\"code\":\"VALIDATION_ERROR\""))
+        .stderr(predicate::str::contains(
+            "mail mark requires at least one of seen/flagged",
+        ));
+}
+
+#[test]
+fn mail_move_and_trash_reject_zero_id_before_network() {
+    let temp = tempdir().expect("tempdir");
+    write_mock_mail_credentials(temp.path());
+
+    yacli()
+        .env("YACLI_CONFIG_DIR", temp.path())
+        .args(["mail", "move", "--account", "mock", "0", "Archive"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "mail move <id> must be greater than zero",
+        ));
+    yacli()
+        .env("YACLI_CONFIG_DIR", temp.path())
+        .args(["mail", "trash", "--account", "mock", "0"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "mail move <id> must be greater than zero",
+        ));
+}

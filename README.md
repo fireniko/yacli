@@ -219,6 +219,10 @@ yacli mail send-link person@example.com "Материалы" "Отправляю
 yacli mail send-link person@example.com "Материалы" "Отправляю ссылку" --source ./archive.zip --path disk:/docs/archive/archive.zip --dry-run
 yacli mail send-published-link person@example.com "Материалы" "Отправляю ссылку" --public-url https://disk.yandex.ru/i/archive-link
 yacli mail send-published-link person@example.com "Материалы" "Отправляю ссылку" --public-url https://disk.yandex.ru/i/archive-link --dry-run
+yacli mail mark 1353 --seen true
+yacli mail mark 1353 --flagged false --dry-run
+yacli mail move 1353 Архив
+yacli mail trash 1353 --dry-run
 yacli disk upload-link --source ./archive.zip --path disk:/docs/archive/archive.zip
 yacli disk upload-link --source ./archive.zip --path disk:/docs/archive/archive.zip --dry-run
 ```
@@ -241,6 +245,10 @@ yacli mail invite create-event 1353 --index 1
 - Если у `mail send-link` уже случился `upload + publish`, а SMTP упал, команда возвращает `status=partial` с готовыми recovery actions: повторить только mail-step через `mail send-published-link`, вручную поделиться ссылкой или отозвать её.
 - `mail send-published-link` — честный retry mail-step для уже опубликованной ссылки без повторного upload/publish.
 - `disk upload-link` — правильный flow, когда нужно просто получить публичную ссылку без отправки письма.
+- `mail mark` меняет только флаги письма (`--seen true|false`, `--flagged true|false`, нужен хотя бы один) командой `UID STORE ... FLAGS.SILENT`; перед изменением проверяет, что письмо с таким UID есть.
+- `mail move <ID> <ПАПКА>` перемещает письмо в уже существующую папку (имя как в `mail folders` или RAW_NAME). Если сервер поддерживает `MOVE`, используется `UID MOVE`; иначе при `UIDPLUS` — `UID COPY` + `\Deleted` + `UID EXPUNGE` только для этого письма; без обоих расширений операция отклоняется, обычный `EXPUNGE` не выполняется никогда.
+- `mail trash <ID>` перемещает письмо в папку с атрибутом `\Trash`. Безвозвратного удаления в yacli нет.
+- У `mail mark`, `mail move`, `mail trash` есть `--dry-run`: проверяет письмо и папки и показывает, что изменится, ничего не меняя.
 
 <details>
 <summary>Ещё примеры</summary>
@@ -521,6 +529,9 @@ Mail:
 - `yacli.mail.send` (включая `attachments` — список локальных путей)
 - `yacli.mail.reply`
 - `yacli.mail.forward`
+- `yacli.mail.mark` (`seen`/`flagged`, `dry_run`)
+- `yacli.mail.move` (`to` — существующая папка, `dry_run`)
+- `yacli.mail.trash` (перемещение в корзину, `dry_run`; безвозвратного удаления нет)
 - `yacli.mail.attachment.export`
 - `yacli.mail.invite.inspect`
 - `yacli.mail.invite.create_event` (селектор `index`/`name` + `event_index` для `.ics` с несколькими VEVENT)

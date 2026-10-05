@@ -738,7 +738,7 @@ fn render_mail_prompt(arguments: &Value) -> Result<String> {
 2. Если непонятно, в какой папке искать письмо, вызови `yacli.mail.folders`.\n\
 3. Для быстрого контекста используй `yacli.mail.list`, а если у пользователя есть ключевые слова — `yacli.mail.search`.\n\
 4. Для точного письма используй `yacli.mail.read` по нужному UID.\n\
-5. Если задача write-oriented, используй `yacli.mail.send`, `yacli.mail.reply` или `yacli.mail.forward` с минимально достаточным payload.\n\
+5. Если задача write-oriented, используй `yacli.mail.send`, `yacli.mail.reply` или `yacli.mail.forward` с минимально достаточным payload. Для пометок и перемещения между папками есть `yacli.mail.mark`, `yacli.mail.move` и `yacli.mail.trash` (сначала вызывай с `dry_run`; безвозвратного удаления нет).\n\
 6. Если нужно сохранить вложение или превратить `.ics` в событие, используй `yacli.mail.attachment.export` и `yacli.mail.invite.create_event`.\n\
 7. В финальном ответе кратко и чётко зафиксируй отправителя, дату, тему, ключевые детали письма и результат write-действия."
     ))

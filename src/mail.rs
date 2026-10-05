@@ -917,6 +917,28 @@ fn parse_copyuid(line: &str) -> Option<u64> {
     dst.parse::<u64>().ok()
 }
 
+/// Единый JSON-ответ для `mark`/`move`/`trash` (CLI и MCP).
+/// Для `dry_run` результат кладётся в `would`, иначе поля результата плоские.
+pub fn mail_change_payload<T: Serialize>(
+    account: &str,
+    dry_run: bool,
+    result: &T,
+) -> serde_json::Value {
+    let value = serde_json::to_value(result).unwrap_or(serde_json::Value::Null);
+    if dry_run {
+        return serde_json::json!({
+            "ok": true,
+            "account": account,
+            "dry_run": true,
+            "would": value,
+        });
+    }
+    let mut object = value.as_object().cloned().unwrap_or_default();
+    object.insert("ok".to_string(), serde_json::json!(true));
+    object.insert("account".to_string(), serde_json::json!(account));
+    serde_json::Value::Object(object)
+}
+
 fn open_authenticated_session(
     imap_host: &str,
     imap_port: u16,

@@ -572,6 +572,65 @@ pub enum MailCommand {
         #[arg(long, default_value_t = 15 * 1024 * 1024, value_name = "БАЙТЫ")]
         max_bytes: u64,
     },
+    /// Пометить письмо: прочитано/не прочитано и флажок. Только состояние письма, содержимое не меняется.
+    Mark {
+        #[arg(long, value_name = "АККАУНТ")]
+        account: Option<String>,
+        #[arg(long, default_value = "INBOX", value_name = "ПАПКА")]
+        folder: String,
+        #[arg(value_name = "ID")]
+        uid: u64,
+        #[arg(
+            long,
+            value_name = "true|false",
+            help = "true — отметить прочитанным, false — непрочитанным"
+        )]
+        seen: Option<bool>,
+        #[arg(
+            long,
+            value_name = "true|false",
+            help = "true — поставить флажок, false — снять"
+        )]
+        flagged: Option<bool>,
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Только проверить, что письмо есть и что изменится, без изменений"
+        )]
+        dry_run: bool,
+    },
+    /// Переместить письмо в другую существующую папку (не создаёт папки и не удаляет письма).
+    Move {
+        #[arg(long, value_name = "АККАУНТ")]
+        account: Option<String>,
+        #[arg(long, default_value = "INBOX", value_name = "ПАПКА")]
+        folder: String,
+        #[arg(value_name = "ID")]
+        uid: u64,
+        #[arg(value_name = "ПАПКА_НАЗНАЧЕНИЯ")]
+        to: String,
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Только проверить, что письмо и папка есть, без перемещения"
+        )]
+        dry_run: bool,
+    },
+    /// Переместить письмо в корзину (папка с атрибутом Trash). Безвозвратного удаления нет.
+    Trash {
+        #[arg(long, value_name = "АККАУНТ")]
+        account: Option<String>,
+        #[arg(long, default_value = "INBOX", value_name = "ПАПКА")]
+        folder: String,
+        #[arg(value_name = "ID")]
+        uid: u64,
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Только проверить, что письмо и корзина есть, без перемещения"
+        )]
+        dry_run: bool,
+    },
     /// Отправить новое письмо.
     Send {
         #[arg(long, value_name = "АККАУНТ")]

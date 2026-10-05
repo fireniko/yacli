@@ -4562,3 +4562,141 @@ rest_base_url = "https://cloud-api.yandex.net"
     let _ = child.kill();
     let _ = child.wait();
 }
+
+#[test]
+fn mcp_stdio_exposes_mail_management_tools_and_validates_before_network() {
+    let temp = tempdir().expect("tempdir");
+    write_mock_mail_account(temp.path());
+    write_credentials_file(
+        temp.path(),
+        r#"
+version = 1
+
+[accounts.mock.services.mail]
+kind = "oauth_pkce"
+access_token = "mail-token"
+token_type = "bearer"
+expires_at_epoch_secs = 4102444800
+scope = ["mail:imap_full", "mail:smtp"]
+client_id = "client-123"
+"#,
+    );
+
+    let input = [
+        initialize_request(true),
+        mcp_notification("notifications/initialized", json!({})),
+        mcp_request(2, "tools/list", json!({})),
+        mcp_request(
+            3,
+            "tools/call",
+            json!({
+                "name": "yacli.mail.mark",
+                "arguments": { "account": "mock", "uid": 42 }
+            }),
+        ),
+        mcp_request(
+            4,
+            "tools/call",
+            json!({
+                "name": "yacli.mail.mark",
+                "arguments": { "account": "mock", "uid": 0, "seen": true }
+            }),
+        ),
+        mcp_request(
+            5,
+            "tools/call",
+            json!({
+                "name": "yacli.mail.move",
+                "arguments": { "account": "mock", "uid": 0, "to": "Archive" }
+            }),
+        ),
+        mcp_request(
+            6,
+            "tools/call",
+            json!({
+                "name": "yacli.mail.trash",
+                "arguments": { "account": "mock", "uid": 0 }
+            }),
+        ),
+        mcp_request(
+            7,
+            "tools/call",
+            json!({
+                "name": "yacli.mail.move",
+                "arguments": { "account": "mock", "uid": 5 }
+            }),
+        ),
+    ]
+    .concat();
+
+    let output = yacli()
+        .env("YACLI_CONFIG_DIR", temp.path())
+        .args(["mcp"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let responses = parse_responses(&output);
+    let tools = responses[1]["result"]["tools"]
+        .as_array()
+        .expect("tools array");
+    let find = |name: &str| {
+        tools
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap_or_else(|| panic!("tool {name} must be listed"))
+    };
+
+    let mark = find("yacli.mail.mark");
+    assert_eq!(mark["inputSchema"]["required"], json!(["uid"]));
+    assert_eq!(mark["inputSchema"]["additionalProperties"], json!(false));
+    assert_eq!(mark["inputSchema"]["properties"]["seen"]["type"], "boolean");
+    assert_eq!(
+        mark["inputSchema"]["properties"]["flagged"]["type"],
+        "boolean"
+    );
+    assert_eq!(
+        mark["inputSchema"]["properties"]["dry_run"]["type"],
+        "boolean"
+    );
+
+    let mv = find("yacli.mail.move");
+    assert_eq!(mv["inputSchema"]["required"], json!(["uid", "to"]));
+    assert_eq!(mv["inputSchema"]["additionalProperties"], json!(false));
+    assert_eq!(mv["inputSchema"]["properties"]["to"]["type"], "string");
+
+    let trash = find("yacli.mail.trash");
+    assert_eq!(trash["inputSchema"]["required"], json!(["uid"]));
+    assert_eq!(trash["inputSchema"]["additionalProperties"], json!(false));
+    assert!(trash["inputSchema"]["properties"].get("to").is_none());
+
+    // Безвозвратного удаления среди инструментов быть не должно.
+    for tool in tools {
+        let name = tool["name"].as_str().expect("name");
+        assert!(
+            !name.contains("delete") || name.starts_with("yacli.calendar.") || name.starts_with("yacli.disk."),
+            "unexpected destructive mail tool {name}"
+        );
+        assert!(!name.contains("expunge"), "unexpected tool {name}");
+    }
+
+    let message = |index: usize| {
+        responses[index]["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert_eq!(responses[2]["error"]["code"], -32602);
+    assert!(message(2).contains("requires at least one of seen/flagged"));
+    assert_eq!(responses[3]["error"]["code"], -32602);
+    assert!(message(3).contains("must be greater than zero"));
+    assert_eq!(responses[4]["error"]["code"], -32602);
+    assert!(message(4).contains("must be greater than zero"));
+    assert_eq!(responses[5]["error"]["code"], -32602);
+    assert!(message(5).contains("must be greater than zero"));
+    // `to` обязателен для move.
+    assert!(responses[6].get("error").is_some());
+}

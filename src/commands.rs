@@ -7,7 +7,8 @@ use serde_json::json;
 
 use crate::account_store::{AccountStore, validate_account};
 use crate::activity_store::{
-    ActivityEntry, ActivityStore, NewActivityEntry, clear_activity, record_activity,
+    ActivityEntry, ActivityStore, NewActivityEntry, clear_activity, mail_management_entry,
+    record_activity,
 };
 use crate::activity_undo::{
     ActivityUndoApplied, ActivityUndoResult, apply_activity_undo, calendar_create_undo,
@@ -48,10 +49,11 @@ use crate::home::home_payload;
 use crate::mail::{
     ExportedMailAttachment, ForwardedMail, InspectedMailInvite, MailAttachmentExportRequest,
     MailAttachmentSelector, MailAttachmentSummary, MailFolder, MailForwardRequest,
-    MailInviteInspectRequest, MailMessage, MailMessageSummary, MailReplyRequest, MailSendRequest,
-    MailSendReview, RepliedMail, SentMail, export_mail_attachment, forward_mail_message,
-    inspect_mail_invite, list_mail_folders, list_mail_messages, load_mail_attachments,
-    read_mail_message, reply_to_mail_message, review_mail_submission, search_mail_messages,
+    MailInviteInspectRequest, MailMarkRequest, MailMarkResult, MailMessage, MailMessageSummary, MailMoveResult,
+    MailMoveTarget, MailReplyRequest, MailSendRequest, MailSendReview, RepliedMail, SentMail,
+    export_mail_attachment, forward_mail_message, inspect_mail_invite, list_mail_folders,
+    list_mail_messages, load_mail_attachments, mail_change_payload, mark_mail_message,
+    move_mail_message, read_mail_message, reply_to_mail_message, review_mail_submission, search_mail_messages,
     send_mail_message,
 };
 use crate::mail_invite_flow::{
@@ -2747,6 +2749,101 @@ fn execute_mail(format: OutputFormat, action: MailCommand) -> Result<RenderedOut
                 render_mail_forward_table(&resolved_account, &folder, &forwarded),
             )
         }
+        MailCommand::Mark {
+            account,
+            folder,
+            uid,
+            seen,
+            flagged,
+            dry_run,
+        } => {
+            let (resolved_account, auth, context) =
+                resolve_mail_private_context(account.as_deref())?;
+            let result = mark_mail_message(
+                &context.imap_host,
+                context.imap_port,
+                auth,
+                &folder,
+                &MailMarkRequest { uid, seen, flagged },
+                dry_run,
+            )?;
+            if !dry_run {
+                record_activity_best_effort(mail_management_entry(
+                    "cli",
+                    "mail.mark",
+                    &resolved_account,
+                ));
+            }
+            ok_output(
+                format,
+                if dry_run { "mail.mark.review" } else { "mail.mark" },
+                mail_change_payload(&resolved_account, dry_run, &result),
+                render_mail_mark_table(&resolved_account, dry_run, &result),
+            )
+        }
+        MailCommand::Move {
+            account,
+            folder,
+            uid,
+            to,
+            dry_run,
+        } => {
+            let (resolved_account, auth, context) =
+                resolve_mail_private_context(account.as_deref())?;
+            let result = move_mail_message(
+                &context.imap_host,
+                context.imap_port,
+                auth,
+                &folder,
+                uid,
+                MailMoveTarget::Folder(&to),
+                dry_run,
+            )?;
+            if !dry_run {
+                record_activity_best_effort(mail_management_entry(
+                    "cli",
+                    "mail.move",
+                    &resolved_account,
+                ));
+            }
+            ok_output(
+                format,
+                if dry_run { "mail.move.review" } else { "mail.move" },
+                mail_change_payload(&resolved_account, dry_run, &result),
+                render_mail_move_table(&resolved_account, dry_run, &result),
+            )
+        }
+        MailCommand::Trash {
+            account,
+            folder,
+            uid,
+            dry_run,
+        } => {
+            let (resolved_account, auth, context) =
+                resolve_mail_private_context(account.as_deref())?;
+            let result = move_mail_message(
+                &context.imap_host,
+                context.imap_port,
+                auth,
+                &folder,
+                uid,
+                MailMoveTarget::Trash,
+                dry_run,
+            )?;
+            if !dry_run {
+                record_activity_best_effort(mail_management_entry(
+                    "cli",
+                    "mail.trash",
+                    &resolved_account,
+                ));
+            }
+            ok_output(
+                format,
+                if dry_run { "mail.trash.review" } else { "mail.trash" },
+                mail_change_payload(&resolved_account, dry_run, &result),
+                render_mail_move_table(&resolved_account, dry_run, &result),
+            )
+        }
         MailCommand::Attachment { action } => execute_mail_attachment(format, action),
         MailCommand::Invite { action } => execute_mail_invite(format, action),
     }
@@ -3493,6 +3590,33 @@ fn all_guide_commands() -> Vec<GuideCommandEntry> {
             ],
         },
         GuideCommandEntry {
+            path: "mail mark",
+            topic: "mail",
+            summary: "Пометить письмо прочитанным/непрочитанным и поставить или снять флажок (меняет только флаги).",
+            requires_account: true,
+            examples: vec![
+                "yacli mail mark 1353 --seen true",
+                "yacli mail mark 1353 --flagged true --dry-run",
+            ],
+        },
+        GuideCommandEntry {
+            path: "mail move",
+            topic: "mail",
+            summary: "Переместить письмо в другую существующую папку (IMAP MOVE или COPY+UID EXPUNGE; папки не создаются).",
+            requires_account: true,
+            examples: vec![
+                "yacli mail move 1353 Архив",
+                "yacli mail move 1353 Архив --folder INBOX --dry-run",
+            ],
+        },
+        GuideCommandEntry {
+            path: "mail trash",
+            topic: "mail",
+            summary: "Переместить письмо в корзину (папка с атрибутом Trash); безвозвратного удаления нет.",
+            requires_account: true,
+            examples: vec!["yacli mail trash 1353", "yacli mail trash 1353 --dry-run"],
+        },
+        GuideCommandEntry {
             path: "calendar calendars",
             topic: "calendar",
             summary: "Показать доступные календари через CalDAV.",
@@ -3657,6 +3781,19 @@ fn all_guide_workflows() -> Vec<GuideWorkflowEntry> {
                 "yacli login",
                 "yacli mail search \"смета\"",
                 "yacli mail forward <id> person@example.com \"FYI\"",
+            ],
+        },
+        GuideWorkflowEntry {
+            id: "mail_triage_flow",
+            topic: "mail",
+            title: "Разобрать письмо: пометить, переложить, в корзину",
+            summary: "Поток от поиска письма до пометки или перемещения; сначала dry-run, безвозвратного удаления нет.",
+            steps: vec![
+                "yacli add me@yandex.ru",
+                "yacli login",
+                "yacli mail search \"смета\"",
+                "yacli mail move <id> Архив --dry-run",
+                "yacli mail move <id> Архив",
             ],
         },
         GuideWorkflowEntry {
@@ -5360,6 +5497,34 @@ fn render_mail_reply_table(account: &str, folder: &str, replied: &RepliedMail) -
         ("reply_subject", replied.sent.subject.clone()),
         ("reply_message_id", replied.sent.message_id.clone()),
         ("body_kind", replied.sent.body_kind.clone()),
+    ])
+}
+
+fn render_mail_mark_table(account: &str, dry_run: bool, result: &MailMarkResult) -> String {
+    render_key_value_table(&[
+        ("account", account.to_string()),
+        ("dry_run", dry_run.to_string()),
+        ("folder", result.folder.clone()),
+        ("id", result.uid.to_string()),
+        ("flags_before", result.flags_before.join(" ")),
+        ("flags_after", result.flags_after.join(" ")),
+    ])
+}
+
+fn render_mail_move_table(account: &str, dry_run: bool, result: &MailMoveResult) -> String {
+    render_key_value_table(&[
+        ("account", account.to_string()),
+        ("dry_run", dry_run.to_string()),
+        ("id", result.uid.to_string()),
+        ("from", result.from.clone()),
+        ("to", result.to.clone()),
+        ("method", result.method.clone()),
+        (
+            "new_id",
+            result
+                .new_uid
+                .map_or_else(|| "-".to_string(), |uid| uid.to_string()),
+        ),
     ])
 }
 

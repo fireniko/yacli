@@ -13,7 +13,9 @@ use crate::credential_store::{
     keyring_secret_delete, keyring_secret_get, keyring_secret_set, secrets_use_keyring,
 };
 use crate::error::{Result, YacliError};
-use crate::oauth::{AuthorizationRequest, AuthorizationSession, OauthService, unix_timestamp_now};
+use crate::oauth::{
+    AuthorizationRequest, AuthorizationSession, OauthService, deduped_scopes, unix_timestamp_now,
+};
 use crate::paths::oauth_sessions_path;
 use crate::persist::write_config_file;
 
@@ -154,6 +156,10 @@ pub struct PendingOauthSession {
     pub session_id: String,
     pub account: String,
     pub services: Vec<String>,
+    /// Scopes requested by this session. Empty for sessions written by older
+    /// builds, which therefore never match (a fresh session is created).
+    #[serde(default)]
+    pub scopes: Vec<String>,
     pub client_id: String,
     pub created_at_epoch_secs: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -189,6 +195,7 @@ impl PendingOauthSession {
                 .iter()
                 .map(|service| service.as_str().to_string())
                 .collect(),
+            scopes: desired_scopes(services),
             client_id: session.client_id.clone(),
             created_at_epoch_secs: unix_timestamp_now(),
             login_hint,
@@ -225,7 +232,8 @@ impl PendingOauthSession {
         }
     }
 
-    fn matches(&self, account: &str, services: &[OauthService], client_id: &str) -> bool {
+    /// Same login (account, client, services), regardless of requested scopes.
+    fn matches_login(&self, account: &str, services: &[OauthService], client_id: &str) -> bool {
         self.matches_service_names(account, client_id)
             && self.services
                 == services
@@ -234,9 +242,21 @@ impl PendingOauthSession {
                     .collect::<Vec<_>>()
     }
 
+    /// Reusable only if the requested scopes are exactly the current ones.
+    fn matches(&self, account: &str, services: &[OauthService], client_id: &str) -> bool {
+        self.matches_login(account, services, client_id) && self.scopes == desired_scopes(services)
+    }
+
     fn matches_service_names(&self, account: &str, client_id: &str) -> bool {
         self.account == account && self.client_id == client_id
     }
+}
+
+fn desired_scopes(services: &[OauthService]) -> Vec<String> {
+    deduped_scopes(services)
+        .into_iter()
+        .map(ToString::to_string)
+        .collect()
 }
 
 pub struct PendingOauthSessionStore {
@@ -437,9 +457,7 @@ impl PendingOauthSessionStore {
         self.file.sessions.retain(|item| {
             let hit = item.matches_service_names(&session.account, &session.client_id)
                 && item.services == session.services;
-            if hit
-                && let Some(vault) = &vault
-            {
+            if hit && let Some(vault) = &vault {
                 let key = item.vault_key(&scope);
                 if key != session.vault_key(&scope)
                     && let Err(err) = vault.delete(&key)
@@ -465,7 +483,7 @@ impl PendingOauthSessionStore {
         let mut doomed = Vec::new();
         let scope = self.scope.clone();
         self.file.sessions.retain(|session| {
-            let hit = session.matches(account, services, client_id);
+            let hit = session.matches_login(account, services, client_id);
             if hit {
                 doomed.push(session.vault_key(&scope));
             }
@@ -553,6 +571,7 @@ mod tests {
             fresh: true,
             account: account.to_string(),
             services: vec!["mail".to_string(), "disk".to_string()],
+            scopes: desired_scopes(BOTH),
             client_id: "client-123".to_string(),
             created_at_epoch_secs: unix_timestamp_now(),
             login_hint: Some("me@yandex.ru".to_string()),
@@ -600,7 +619,8 @@ mod tests {
         let path = temp.path().join("oauth_sessions.toml");
         let (memory, vault) = memory_vault();
 
-        let mut store = PendingOauthSessionStore::load_unlocked(&path, vault.clone()).expect("load");
+        let mut store =
+            PendingOauthSessionStore::load_unlocked(&path, vault.clone()).expect("load");
         store.replace_matching(sample_session("mock"));
         store.save_unlocked(&path).expect("save");
 
@@ -625,7 +645,8 @@ mod tests {
         let path = temp.path().join("oauth_sessions.toml");
         let (memory, vault) = memory_vault();
 
-        let mut store = PendingOauthSessionStore::load_unlocked(&path, vault.clone()).expect("load");
+        let mut store =
+            PendingOauthSessionStore::load_unlocked(&path, vault.clone()).expect("load");
         store.replace_matching(sample_session("mock"));
         store.save_unlocked(&path).expect("save");
         assert_eq!(memory.secrets.lock().expect("lock").len(), 1);
@@ -654,7 +675,8 @@ mod tests {
         let mut stale = sample_session("mock");
         stale.created_at_epoch_secs = unix_timestamp_now() - PENDING_OAUTH_SESSION_TTL_SECS - 1;
 
-        let mut store = PendingOauthSessionStore::load_unlocked(&path, vault.clone()).expect("load");
+        let mut store =
+            PendingOauthSessionStore::load_unlocked(&path, vault.clone()).expect("load");
         store.replace_matching(stale);
         store.save_unlocked(&path).expect("save");
         assert_eq!(memory.secrets.lock().expect("lock").len(), 1);
@@ -662,7 +684,10 @@ mod tests {
         let store = PendingOauthSessionStore::load_unlocked(&path, vault).expect("reload");
         assert!(store.get_matching("mock", BOTH, "client-123").is_none());
         assert!(memory.secrets.lock().expect("lock").is_empty());
-        assert!(!path.exists(), "expired session file must be rewritten away");
+        assert!(
+            !path.exists(),
+            "expired session file must be rewritten away"
+        );
     }
 
     #[test]
@@ -679,7 +704,11 @@ mod tests {
         let mut store = PendingOauthSessionStore::load_unlocked(&path, None).expect("load");
         store.replace_matching(stale);
         store.save_unlocked(&path).expect("save");
-        assert!(fs::read_to_string(&path).expect("read").contains("verifier-123"));
+        assert!(
+            fs::read_to_string(&path)
+                .expect("read")
+                .contains("verifier-123")
+        );
 
         let store = PendingOauthSessionStore::load_unlocked(&path, None).expect("reload");
         assert!(store.get_matching("mock", BOTH, "client-123").is_none());
@@ -698,7 +727,11 @@ mod tests {
         let mut legacy = PendingOauthSessionStore::load_unlocked(&path, None).expect("load");
         legacy.replace_matching(sample_session("mock"));
         legacy.save_unlocked(&path).expect("save legacy");
-        assert!(fs::read_to_string(&path).expect("read").contains("verifier-123"));
+        assert!(
+            fs::read_to_string(&path)
+                .expect("read")
+                .contains("verifier-123")
+        );
 
         let (memory, vault) = memory_vault();
         let store = PendingOauthSessionStore::load_unlocked(&path, vault).expect("migrate");
@@ -709,7 +742,11 @@ mod tests {
                 .code_verifier,
             "verifier-123"
         );
-        assert!(!fs::read_to_string(&path).expect("read").contains("verifier-123"));
+        assert!(
+            !fs::read_to_string(&path)
+                .expect("read")
+                .contains("verifier-123")
+        );
         assert_eq!(memory.secrets.lock().expect("lock").len(), 1);
     }
 
@@ -722,7 +759,8 @@ mod tests {
         let path = temp.path().join("oauth_sessions.toml");
         let (memory, vault) = memory_vault();
 
-        let mut store = PendingOauthSessionStore::load_unlocked(&path, vault.clone()).expect("load");
+        let mut store =
+            PendingOauthSessionStore::load_unlocked(&path, vault.clone()).expect("load");
         store.replace_matching(sample_session("mock"));
         store.save_unlocked(&path).expect("save");
         memory.secrets.lock().expect("lock").clear();
@@ -948,5 +986,67 @@ mod tests {
         assert!(lock_path.exists());
         drop(lock);
         assert!(!lock_path.exists());
+    }
+
+    #[test]
+    fn session_with_same_scopes_is_reused() {
+        let mut store = PendingOauthSessionStore {
+            file: PendingOauthSessionsFile::default(),
+            vault: None,
+            scope: String::new(),
+        };
+        store.replace_matching(sample_session("mock"));
+        assert!(store.get_matching("mock", BOTH, "client-123").is_some());
+    }
+
+    #[test]
+    fn session_with_different_scopes_is_not_reused() {
+        let mut store = PendingOauthSessionStore {
+            file: PendingOauthSessionsFile::default(),
+            vault: None,
+            scope: String::new(),
+        };
+        let mut session = sample_session("mock");
+        session.scopes = vec!["mail:imap_ro".to_string()];
+        store.replace_matching(session);
+        assert!(store.get_matching("mock", BOTH, "client-123").is_none());
+    }
+
+    #[test]
+    fn legacy_session_without_scopes_is_not_reused_but_is_cleaned_up() {
+        let mut store = PendingOauthSessionStore {
+            file: PendingOauthSessionsFile::default(),
+            vault: None,
+            scope: String::new(),
+        };
+        let mut session = sample_session("mock");
+        session.scopes = Vec::new();
+        store.replace_matching(session);
+        assert!(store.get_matching("mock", BOTH, "client-123").is_none());
+        assert!(
+            store
+                .remove_matching("mock", BOTH, "client-123")
+                .expect("remove")
+        );
+    }
+
+    #[test]
+    fn legacy_toml_without_scopes_field_parses_with_empty_scopes() {
+        let toml_text = r#"
+[[sessions]]
+account = "mock"
+services = ["mail"]
+client_id = "client-123"
+created_at_epoch_secs = 1
+code_verifier = "v"
+
+[sessions.authorization]
+authorization_url = "https://example.test/authorize"
+redirect_uri = "https://oauth.yandex.ru/verification_code"
+state = "s"
+code_challenge_method = "S256"
+"#;
+        let file: PendingOauthSessionsFile = toml::from_str(toml_text).expect("parse");
+        assert!(file.sessions[0].scopes.is_empty());
     }
 }

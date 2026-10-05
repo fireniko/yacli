@@ -199,7 +199,7 @@ fn oauth_endpoint(base_url: &str, path: &str) -> Result<Url> {
         .map_err(|err| YacliError::Config(format!("invalid OAuth endpoint: {err}")))
 }
 
-fn deduped_scopes(services: &[OauthService]) -> Vec<&'static str> {
+pub(crate) fn deduped_scopes(services: &[OauthService]) -> Vec<&'static str> {
     let mut scopes = Vec::new();
     for service in services {
         for scope in service.scopes() {

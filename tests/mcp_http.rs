@@ -4917,3 +4917,115 @@ fn mcp_http_goal_route_tool_matches_invite_workflow_for_russian_goal() {
     );
     assert!(payload["result"]["structuredContent"]["remediation"].is_object());
 }
+
+fn initialize_session(client: &Client, server: &TestHttpServer, token: Option<&str>) -> String {
+    let mut request = client.post(server.url()).json(&json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": { "name": "http-test", "version": "0.1.0" }
+        }
+    }));
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().expect("initialize");
+    assert!(response.status().is_success());
+    response
+        .headers()
+        .get("Mcp-Session-Id")
+        .expect("session id")
+        .to_str()
+        .expect("session id text")
+        .to_string()
+}
+
+#[test]
+fn mcp_http_refuses_non_loopback_listen_address() {
+    for listen in ["0.0.0.0:0", "192.168.1.5:8787", "[::]:0", "localhost:8787", "garbage"] {
+        let output = Command::new(cargo_bin("yacli"))
+            .args(["mcp", "--transport", "http", "--listen", listen])
+            .env("YACLI_SECRET_BACKEND", "file")
+            .output()
+            .expect("run yacli");
+        assert!(!output.status.success(), "{listen} must be refused");
+        let text = String::from_utf8_lossy(&output.stderr).to_string()
+            + &String::from_utf8_lossy(&output.stdout);
+        assert!(
+            text.contains("--listen") || text.contains("loopback"),
+            "{listen}: expected explanatory error, got: {text}"
+        );
+    }
+}
+
+#[test]
+fn mcp_http_rejects_unexpected_host_header() {
+    let server = TestHttpServer::spawn();
+    let client = client();
+    let port = server.addr.rsplit(':').next().expect("port").to_string();
+
+    for host in [
+        "evil.example".to_string(),
+        format!("evil.example:{port}"),
+        "127.0.0.1:1".to_string(),
+        format!("127.0.0.1.evil.example:{port}"),
+    ] {
+        let response = client
+            .post(server.url())
+            .header("Host", &host)
+            .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}))
+            .send()
+            .expect("response");
+        assert_eq!(response.status().as_u16(), 403, "Host `{host}` must be rejected");
+    }
+
+    for host in [format!("localhost:{port}"), format!("127.0.0.1:{port}")] {
+        let response = client
+            .request(Method::OPTIONS, server.url())
+            .header("Host", &host)
+            .send()
+            .expect("response");
+        assert!(response.status().is_success(), "Host `{host}` must pass");
+    }
+}
+
+#[test]
+fn mcp_http_bearer_token_covers_all_tool_calls_and_resource_reads() {
+    let server = TestHttpServer::spawn_with_envs(&[("YACLI_MCP_HTTP_BEARER_TOKEN", "secret-token")]);
+    let client = client();
+    let session = initialize_session(&client, &server, None);
+
+    let call = |token: Option<&str>, body: Value| {
+        let mut request = client
+            .post(server.url())
+            .header("Mcp-Session-Id", &session)
+            .json(&body);
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        request.send().expect("response").status().as_u16()
+    };
+    let tool_call = json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": { "name": "yacli.goal.route", "arguments": { "goal": "x" } }
+    });
+    let unknown_tool = json!({
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": { "name": "some.other.tool", "arguments": {} }
+    });
+    let resource_read = json!({
+        "jsonrpc": "2.0", "id": 4, "method": "resources/read",
+        "params": { "uri": "yacli://mail/inbox" }
+    });
+
+    for body in [&tool_call, &unknown_tool, &resource_read] {
+        assert_eq!(call(None, body.clone()), 401, "no token: {body}");
+        assert_eq!(call(Some("wrong"), body.clone()), 401, "wrong token: {body}");
+        assert_eq!(call(Some("secret-toke"), body.clone()), 401, "prefix: {body}");
+        assert_eq!(call(Some("secret-token-"), body.clone()), 401, "longer: {body}");
+        assert_ne!(call(Some("secret-token"), body.clone()), 401, "right token: {body}");
+    }
+}

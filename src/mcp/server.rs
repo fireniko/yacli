@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, hash_map::DefaultHasher};
 use std::convert::Infallible;
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, Write};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -355,6 +356,7 @@ struct HttpAppState {
     sessions: Arc<Mutex<HashMap<String, HttpSession>>>,
     auth: HttpAuthConfig,
     auth_discovery: Option<HttpAuthDiscovery>,
+    allowed_hosts: Arc<Vec<String>>,
 }
 
 #[derive(Clone, Default)]
@@ -369,19 +371,68 @@ struct HttpAuthDiscovery {
     protected_resource_metadata_url: String,
 }
 
+/// Parse `--listen` and refuse anything that is not a loopback IP address.
+pub fn parse_loopback_listen(listen: &str) -> Result<SocketAddr> {
+    let addr: SocketAddr = listen.trim().parse().map_err(|err| {
+        YacliError::Config(format!(
+            "invalid --listen address `{listen}`: {err}; expected IP:PORT such as 127.0.0.1:8787"
+        ))
+    })?;
+    if !addr.ip().is_loopback() {
+        return Err(YacliError::Config(format!(
+            "refusing to listen on non-loopback address `{listen}`: the MCP HTTP server may only bind to 127.0.0.1 or ::1"
+        )));
+    }
+    Ok(addr)
+}
+
+/// Host header values accepted for a server bound to `port`.
+fn allowed_host_headers(port: u16) -> Vec<String> {
+    vec![
+        format!("127.0.0.1:{port}"),
+        format!("localhost:{port}"),
+        format!("[::1]:{port}"),
+    ]
+}
+
+fn request_host_allowed(headers: &HeaderMap, allowed: &[String]) -> Result<()> {
+    let host = header_value(headers, "Host").map(|value| value.trim().to_ascii_lowercase());
+    match host {
+        Some(host) if allowed.iter().any(|candidate| *candidate == host) => Ok(()),
+        _ => Err(YacliError::Validation(
+            "Host header is not allowed for local MCP HTTP transport".to_string(),
+        )),
+    }
+}
+
+/// Host and Origin checks shared by every HTTP handler.
+fn check_request_headers(state: &HttpAppState, headers: &HeaderMap) -> Result<()> {
+    request_host_allowed(headers, &state.allowed_hosts)?;
+    request_origin_allowed(headers)
+}
+
 pub fn serve_http(listen: &str, public_url: Option<&str>) -> Result<()> {
+    let listen_addr = parse_loopback_listen(listen)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|err| YacliError::Io(format!("failed to start HTTP runtime: {err}")))?;
 
     runtime.block_on(async move {
+        let listener = tokio::net::TcpListener::bind(listen_addr).await.map_err(|err| {
+            YacliError::Io(format!("failed to bind MCP HTTP server at {listen}: {err}"))
+        })?;
+        let bound_port = listener
+            .local_addr()
+            .map_err(|err| YacliError::Io(format!("failed to read bound address: {err}")))?
+            .port();
         let auth = HttpAuthConfig::from_env();
         let auth_discovery = HttpAuthDiscovery::from_config(listen, public_url, &auth)?;
         let state = HttpAppState {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             auth,
             auth_discovery,
+            allowed_hosts: Arc::new(allowed_host_headers(bound_port)),
         };
         spawn_http_resource_poller(state.clone());
 
@@ -403,9 +454,6 @@ pub fn serve_http(listen: &str, public_url: Option<&str>) -> Result<()> {
             )
             .with_state(state);
 
-        let listener = tokio::net::TcpListener::bind(listen).await.map_err(|err| {
-            YacliError::Io(format!("failed to bind MCP HTTP server at {listen}: {err}"))
-        })?;
         axum::serve(listener, app)
             .await
             .map_err(|err| YacliError::Io(format!("MCP HTTP server failed: {err}")))
@@ -511,7 +559,7 @@ async fn handle_http_post(
     headers: HeaderMap,
     Json(message): Json<Value>,
 ) -> Response {
-    if let Err(err) = request_origin_allowed(&headers) {
+    if let Err(err) = check_request_headers(&state, &headers) {
         return http_error_response(StatusCode::FORBIDDEN, &err.to_string(), None);
     }
 
@@ -795,7 +843,7 @@ async fn handle_http_roots_tool_call(
 }
 
 async fn handle_http_get(State(state): State<HttpAppState>, headers: HeaderMap) -> Response {
-    if let Err(err) = request_origin_allowed(&headers) {
+    if let Err(err) = check_request_headers(&state, &headers) {
         return http_error_response(StatusCode::FORBIDDEN, &err.to_string(), None);
     }
 
@@ -862,7 +910,7 @@ async fn handle_http_get(State(state): State<HttpAppState>, headers: HeaderMap) 
 }
 
 async fn handle_http_delete(State(state): State<HttpAppState>, headers: HeaderMap) -> Response {
-    if let Err(err) = request_origin_allowed(&headers) {
+    if let Err(err) = check_request_headers(&state, &headers) {
         return http_error_response(StatusCode::FORBIDDEN, &err.to_string(), None);
     }
 
@@ -882,14 +930,20 @@ async fn handle_http_delete(State(state): State<HttpAppState>, headers: HeaderMa
     http_empty_response(StatusCode::NO_CONTENT, Some(&session_id))
 }
 
-async fn handle_http_options(headers: HeaderMap) -> Response {
-    if let Err(err) = request_origin_allowed(&headers) {
+async fn handle_http_options(State(state): State<HttpAppState>, headers: HeaderMap) -> Response {
+    if let Err(err) = check_request_headers(&state, &headers) {
         return http_error_response(StatusCode::FORBIDDEN, &err.to_string(), None);
     }
     http_empty_response(StatusCode::NO_CONTENT, None)
 }
 
-async fn handle_http_protected_resource_metadata(State(state): State<HttpAppState>) -> Response {
+async fn handle_http_protected_resource_metadata(
+    State(state): State<HttpAppState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(err) = request_host_allowed(&headers, &state.allowed_hosts) {
+        return http_error_response(StatusCode::FORBIDDEN, &err.to_string(), None);
+    }
     let Some(auth_discovery) = state.auth_discovery.as_ref() else {
         return http_error_response(
             StatusCode::NOT_FOUND,
@@ -4189,21 +4243,12 @@ fn needs_http_auth(messages: &[Value]) -> bool {
     messages.iter().any(message_requires_http_auth)
 }
 
+/// Every tool call and resource read needs the bearer token when one is configured.
 fn message_requires_http_auth(message: &Value) -> bool {
-    message.get("method").and_then(Value::as_str) == Some("tools/call")
-        && message
-            .get("params")
-            .and_then(|params| params.get("name"))
-            .and_then(Value::as_str)
-            .map(tool_requires_http_auth)
-            .unwrap_or(false)
-}
-
-fn tool_requires_http_auth(tool_name: &str) -> bool {
-    matches!(tool_name, "yacli.auth.status")
-        || tool_name.starts_with("yacli.mail.")
-        || tool_name.starts_with("yacli.calendar.")
-        || tool_name.starts_with("yacli.disk.")
+    matches!(
+        message.get("method").and_then(Value::as_str),
+        Some("tools/call" | "resources/read")
+    )
 }
 
 fn read_message(reader: &mut dyn BufRead) -> Result<Option<(Value, StdioMessageFormat)>> {
@@ -4299,13 +4344,26 @@ fn request_origin_allowed(headers: &HeaderMap) -> Result<()> {
             "origin is not allowed for local MCP HTTP transport".to_string(),
         ));
     };
-    if matches!(host, "localhost" | "127.0.0.1" | "::1") {
+    if matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]") {
         Ok(())
     } else {
         Err(YacliError::Validation(
             "origin is not allowed for local MCP HTTP transport".to_string(),
         ))
     }
+}
+
+/// Compare secrets without leaking length or position of the first mismatch:
+/// both sides are hashed to fixed-size digests, then compared with XOR-accumulate.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    use sha2::{Digest, Sha256};
+    let da = Sha256::digest(a);
+    let db = Sha256::digest(b);
+    let mut diff = 0u8;
+    for (x, y) in da.iter().zip(db.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -4333,7 +4391,7 @@ impl HttpAuthConfig {
         };
         authorization
             .strip_prefix("Bearer ")
-            .map(|token| token == expected)
+            .map(|token| constant_time_eq(token.as_bytes(), expected.as_bytes()))
             .unwrap_or(false)
     }
 }
@@ -4498,4 +4556,79 @@ fn canonical_base_url(server_url: &str) -> Result<String> {
     parsed.set_query(None);
     parsed.set_fragment(None);
     Ok(parsed.to_string().trim_end_matches('/').to_string())
+}
+
+#[cfg(test)]
+mod http_hardening_tests {
+    use super::*;
+
+    #[test]
+    fn listen_accepts_only_loopback_ip_addresses() {
+        assert!(parse_loopback_listen("127.0.0.1:8787").is_ok());
+        assert!(parse_loopback_listen("127.0.0.2:0").is_ok());
+        assert!(parse_loopback_listen("[::1]:8787").is_ok());
+        for bad in [
+            "0.0.0.0:8787",
+            "192.168.0.10:8787",
+            "[::]:8787",
+            "8.8.8.8:80",
+            "localhost:8787",
+            "127.0.0.1",
+            "",
+        ] {
+            let err = parse_loopback_listen(bad).expect_err(bad);
+            assert!(err.to_string().contains("--listen") || err.to_string().contains("loopback"));
+        }
+    }
+
+    #[test]
+    fn constant_time_eq_compares_values() {
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(!constant_time_eq(b"secret", b"secreT"));
+        assert!(!constant_time_eq(b"secret", b"secret2"));
+        assert!(!constant_time_eq(b"", b"x"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn host_header_must_match_loopback_with_port() {
+        let allowed = allowed_host_headers(8787);
+        let check = |host: Option<&str>| {
+            let mut headers = HeaderMap::new();
+            if let Some(host) = host {
+                headers.insert("Host", HeaderValue::from_str(host).unwrap());
+            }
+            request_host_allowed(&headers, &allowed).is_ok()
+        };
+        assert!(check(Some("127.0.0.1:8787")));
+        assert!(check(Some("localhost:8787")));
+        assert!(check(Some("LOCALHOST:8787")));
+        assert!(check(Some("[::1]:8787")));
+        assert!(!check(Some("127.0.0.1:8788")));
+        assert!(!check(Some("localhost")));
+        assert!(!check(Some("evil.example:8787")));
+        assert!(!check(Some("localhost.evil.example:8787")));
+        assert!(!check(None));
+    }
+
+    #[test]
+    fn origin_accepts_ipv6_loopback() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Origin", HeaderValue::from_static("http://[::1]:8787"));
+        assert!(request_origin_allowed(&headers).is_ok());
+        headers.insert("Origin", HeaderValue::from_static("https://example.com"));
+        assert!(request_origin_allowed(&headers).is_err());
+    }
+
+    #[test]
+    fn auth_is_required_for_every_tool_call_and_resource_read() {
+        let msg = |method: &str, name: &str| {
+            json!({"jsonrpc":"2.0","id":1,"method":method,"params":{"name":name}})
+        };
+        assert!(message_requires_http_auth(&msg("tools/call", "yacli.goal.route")));
+        assert!(message_requires_http_auth(&msg("tools/call", "anything")));
+        assert!(message_requires_http_auth(&msg("resources/read", "")));
+        assert!(!message_requires_http_auth(&msg("initialize", "")));
+        assert!(!message_requires_http_auth(&msg("tools/list", "")));
+    }
 }

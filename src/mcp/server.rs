@@ -398,7 +398,7 @@ fn allowed_host_headers(port: u16) -> Vec<String> {
 fn request_host_allowed(headers: &HeaderMap, allowed: &[String]) -> Result<()> {
     let host = header_value(headers, "Host").map(|value| value.trim().to_ascii_lowercase());
     match host {
-        Some(host) if allowed.iter().any(|candidate| *candidate == host) => Ok(()),
+        Some(host) if allowed.contains(&host) => Ok(()),
         _ => Err(YacliError::Validation(
             "Host header is not allowed for local MCP HTTP transport".to_string(),
         )),

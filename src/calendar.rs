@@ -374,18 +374,11 @@ impl CaldavClient {
     }
 
     fn find_calendar(&self, calendar_ref: &str) -> Result<CalendarCollection> {
-        self.list_calendars()?
-            .into_iter()
-            .find(|calendar| {
-                calendar.id == calendar_ref
-                    || calendar.name == calendar_ref
-                    || calendar.href == calendar_ref
-            })
-            .ok_or_else(|| {
-                YacliError::Validation(format!(
-                    "calendar `{calendar_ref}` not found; run `yacli calendar calendars` to inspect available ids"
-                ))
-            })
+        pick_calendar(self.list_calendars()?, calendar_ref).ok_or_else(|| {
+            YacliError::Validation(format!(
+                "calendar `{calendar_ref}` not found; run `yacli calendar calendars` to inspect available ids"
+            ))
+        })
     }
 
     fn list_events(
@@ -754,6 +747,23 @@ struct DavResponse {
     getetag: Option<String>,
     calendar_data: Option<String>,
     resourcetypes: Vec<String>,
+}
+
+/// Resolves a calendar reference. Newer Yandex accounts have no collection named
+/// `default` (their event calendar is `events-<number>`), so the implicit
+/// `default` falls back to the first event calendar, never to a task list.
+fn pick_calendar(calendars: Vec<CalendarCollection>, calendar_ref: &str) -> Option<CalendarCollection> {
+    if let Some(index) = calendars.iter().position(|calendar| {
+        calendar.id == calendar_ref || calendar.name == calendar_ref || calendar.href == calendar_ref
+    }) {
+        return calendars.into_iter().nth(index);
+    }
+    if calendar_ref == "default" {
+        return calendars
+            .into_iter()
+            .find(|calendar| calendar.id.starts_with("events-"));
+    }
+    None
 }
 
 fn parse_dav_responses(xml: &str) -> Result<Vec<DavResponse>> {
@@ -1609,5 +1619,39 @@ END:VCALENDAR]]></c:calendar-data>
             responses[0].displayname.as_deref(),
             Some("Work & Home \u{41f} <x>")
         );
+    }
+
+    #[test]
+    fn pick_calendar_falls_back_to_events_calendar_for_default_only() {
+        let make = |id: &str, name: &str| super::CalendarCollection {
+            id: id.to_string(),
+            name: name.to_string(),
+            href: format!("/calendars/user/{id}/"),
+            description: None,
+        };
+        let calendars = vec![make("events-1", "Мои события"), make("todos-2", "Не забыть")];
+
+        assert_eq!(
+            super::pick_calendar(calendars.clone(), "default").map(|c| c.id),
+            Some("events-1".to_string())
+        );
+        assert_eq!(
+            super::pick_calendar(calendars.clone(), "todos-2").map(|c| c.id),
+            Some("todos-2".to_string())
+        );
+        assert_eq!(
+            super::pick_calendar(calendars.clone(), "Не забыть").map(|c| c.id),
+            Some("todos-2".to_string())
+        );
+        // an explicit unknown id never falls back
+        assert!(super::pick_calendar(calendars.clone(), "events-999").is_none());
+        // a real collection named `default` wins over the fallback
+        let with_default = vec![make("events-1", "A"), make("default", "B")];
+        assert_eq!(
+            super::pick_calendar(with_default, "default").map(|c| c.id),
+            Some("default".to_string())
+        );
+        // no event calendar at all: still an error, not a task list
+        assert!(super::pick_calendar(vec![make("todos-2", "T")], "default").is_none());
     }
 }

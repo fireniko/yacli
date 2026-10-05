@@ -439,7 +439,7 @@ pub fn send_mail_message(
     ensure_smtp_safe_submission(&prepared)?;
     let mut session = SmtpSession::connect(smtp_host, smtp_port)?;
     session.read_greeting(smtp_host)?;
-    session.ehlo("yacli.nextstat.dev")?;
+    session.ehlo("localhost")?;
     match &prepared.auth {
         MailSmtpAuth::OauthXoauth2 {
             account,
@@ -1398,7 +1398,7 @@ fn prepare_mail_submission(
     let subject = normalize_subject(request.subject)?;
     let attachments = request.attachments;
     let body = normalize_outgoing_body(request.text, request.html, "mail send")?;
-    let message_id = generate_message_id();
+    let message_id = generate_message_id(&from);
     let body_kind = if attachments.is_empty() {
         body.body_kind.clone()
     } else {
@@ -2559,11 +2559,28 @@ fn sanitize_header_ascii(value: &str, header_name: &str) -> Result<String> {
     Ok(value.to_string())
 }
 
-fn generate_message_id() -> String {
+/// Message-ID domain is the sender's own mail domain, so outgoing mail
+/// carries no third-party project domain.
+fn message_id_domain(from: &str) -> &str {
+    match from.rsplit_once('@') {
+        Some((_, domain))
+            if !domain.is_empty()
+                && domain
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '.' || ch == '-') =>
+        {
+            domain
+        }
+        _ => "localhost",
+    }
+}
+
+fn generate_message_id(from: &str) -> String {
     format!(
-        "yacli-{}-{:016x}@nextstat.dev",
+        "yacli-{}-{:016x}@{}",
         Utc::now().timestamp_micros(),
-        random::<u64>()
+        random::<u64>(),
+        message_id_domain(from)
     )
 }
 
@@ -2848,7 +2865,7 @@ mod tests {
         MailAttachmentSelector, MailAttachmentSummary, MailMessage, MailSendRequest,
         MailSessionAuth, MailThreadHeaders, OutgoingMessage, SMTP_SAFE_MESSAGE_BYTES, SmtpSession,
         build_forward_body, build_message_summary, build_outgoing_message, build_read_message,
-        build_reply_target, build_xoauth2_payload, decode_modified_utf7, encode_modified_utf7,
+        build_reply_target, build_xoauth2_payload, generate_message_id, message_id_domain, decode_modified_utf7, encode_modified_utf7,
         export_attachment_from_message, extract_message_content, inspect_invite_from_message,
         load_mail_attachments, normalize_forward_subject, normalize_reply_subject,
         normalize_search_query, parse_fetch_metadata, parse_imap_token, parse_list_line,
@@ -3806,5 +3823,18 @@ mod tests {
         assert_eq!(inspected.invites.len(), 1);
         assert_eq!(inspected.invites[0].uid.as_deref(), Some("evt-1"));
         assert_eq!(inspected.invites[0].summary.as_deref(), Some("Sync"));
+    }
+
+    #[test]
+    fn message_id_uses_sender_domain_and_never_a_foreign_domain() {
+        assert_eq!(message_id_domain("user@yandex.ru"), "yandex.ru");
+        assert_eq!(message_id_domain("user@sub.example-mail.com"), "sub.example-mail.com");
+        assert_eq!(message_id_domain("no-at-sign"), "localhost");
+        assert_eq!(message_id_domain("user@"), "localhost");
+        assert_eq!(message_id_domain("user@bad host"), "localhost");
+        let id = generate_message_id("user@yandex.ru");
+        assert!(id.starts_with("yacli-"));
+        assert!(id.ends_with("@yandex.ru"));
+        assert!(!id.contains("nextstat"));
     }
 }

@@ -61,7 +61,7 @@ pub struct DiskConfig {
     pub credential_ref: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MailAuthMode {
     OauthXoauth2,

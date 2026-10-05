@@ -7040,3 +7040,182 @@ rest_base_url = "{}"
 
     assert_eq!(fs::read(&output_path).expect("existing file"), b"existing");
 }
+
+const MAIL_APP_SECRET: &str = "mail-app-secret-xyz";
+
+fn write_mail_mock_account(config_dir: &std::path::Path, mode: &str, mail_ref: Option<&str>) {
+    write_mock_account_with_refs(
+        config_dir,
+        "https://cloud-api.yandex.net",
+        mode,
+        mail_ref,
+        None,
+    );
+}
+
+#[test]
+fn mail_login_stores_app_password_and_sets_ref_without_leaking_secret() {
+    let temp = tempdir().expect("tempdir");
+    write_mail_mock_account(temp.path(), "app_password", None);
+
+    for format in ["json", "table"] {
+        let assert = yacli()
+            .env("YACLI_CONFIG_DIR", temp.path())
+            .args([
+                "--format",
+                format,
+                "auth",
+                "login",
+                "--account",
+                "mock",
+                "--service",
+                "mail",
+                "--app-password",
+                MAIL_APP_SECRET,
+            ])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(MAIL_APP_SECRET).not())
+            .stderr(predicate::str::contains(MAIL_APP_SECRET).not());
+        if format == "json" {
+            let value: Value =
+                serde_json::from_slice(&assert.get_output().stdout).expect("valid json");
+            assert_eq!(value["service"], "mail");
+            assert_eq!(value["credential_ref"], "store:mail");
+            assert_eq!(value["mode"], "app_password_store");
+        }
+    }
+
+    let accounts = fs::read_to_string(temp.path().join("accounts.toml")).expect("accounts");
+    assert!(accounts.contains("credential_ref = \"store:mail\""));
+    assert!(!accounts.contains(MAIL_APP_SECRET));
+    let credentials =
+        fs::read_to_string(temp.path().join("credentials.toml")).expect("credentials");
+    assert!(credentials.contains("[accounts.mock.services.mail]"));
+    assert!(credentials.contains(MAIL_APP_SECRET));
+
+    let output = yacli()
+        .env("YACLI_CONFIG_DIR", temp.path())
+        .args(["auth", "status", "--account", "mock"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(MAIL_APP_SECRET).not())
+        .get_output()
+        .stdout
+        .clone();
+    let value: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(
+        value["services"]["mail"]["credential_state"],
+        "store_present"
+    );
+}
+
+#[test]
+fn mail_login_env_var_sets_env_ref_without_touching_credentials_store() {
+    let temp = tempdir().expect("tempdir");
+    write_mail_mock_account(temp.path(), "app_password", None);
+
+    let output = yacli()
+        .env("YACLI_CONFIG_DIR", temp.path())
+        .env("YACLI_TEST_MAIL_PW", MAIL_APP_SECRET)
+        .args([
+            "auth",
+            "login",
+            "--account",
+            "mock",
+            "--service",
+            "mail",
+            "--env-var",
+            "YACLI_TEST_MAIL_PW",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(MAIL_APP_SECRET).not())
+        .get_output()
+        .stdout
+        .clone();
+    let value: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(value["credential_ref"], "env:YACLI_TEST_MAIL_PW");
+    assert_eq!(value["mode"], "app_password_env");
+
+    let accounts = fs::read_to_string(temp.path().join("accounts.toml")).expect("accounts");
+    assert!(accounts.contains("credential_ref = \"env:YACLI_TEST_MAIL_PW\""));
+    assert!(!temp.path().join("credentials.toml").exists());
+}
+
+#[test]
+fn mail_login_app_password_mode_without_secret_source_is_rejected() {
+    let temp = tempdir().expect("tempdir");
+    write_mail_mock_account(temp.path(), "app_password", None);
+    yacli()
+        .env("YACLI_CONFIG_DIR", temp.path())
+        .args(["auth", "login", "--account", "mock", "--service", "mail"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--env-var NAME"));
+}
+
+#[test]
+fn mail_login_app_password_on_oauth_account_hints_how_to_switch() {
+    let temp = tempdir().expect("tempdir");
+    write_mail_mock_account(temp.path(), "oauth_xoauth2", None);
+    yacli()
+        .env("YACLI_CONFIG_DIR", temp.path())
+        .args([
+            "auth",
+            "login",
+            "--account",
+            "mock",
+            "--service",
+            "mail",
+            "--app-password",
+            MAIL_APP_SECRET,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("set-mail-auth app-password"))
+        .stderr(predicate::str::contains("--mail-auth-mode app-password"))
+        .stderr(predicate::str::contains(MAIL_APP_SECRET).not());
+    assert!(!temp.path().join("credentials.toml").exists());
+}
+
+#[test]
+fn account_set_mail_auth_switches_mode_and_clears_old_ref() {
+    let temp = tempdir().expect("tempdir");
+    write_mail_mock_account(temp.path(), "oauth_xoauth2", Some("store:mail"));
+    let output = yacli()
+        .env("YACLI_CONFIG_DIR", temp.path())
+        .args([
+            "account",
+            "set-mail-auth",
+            "app-password",
+            "--account",
+            "mock",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: Value = serde_json::from_slice(&output).expect("valid json");
+    assert_eq!(value["mail_auth_mode"], "app_password");
+    assert_eq!(value["changed"], true);
+    let accounts = fs::read_to_string(temp.path().join("accounts.toml")).expect("accounts");
+    assert!(accounts.contains("auth_mode = \"app_password\""));
+    assert!(!accounts.contains("store:mail"));
+
+    yacli()
+        .env("YACLI_CONFIG_DIR", temp.path())
+        .args([
+            "auth",
+            "login",
+            "--account",
+            "mock",
+            "--service",
+            "mail",
+            "--app-password",
+            MAIL_APP_SECRET,
+        ])
+        .assert()
+        .success();
+}

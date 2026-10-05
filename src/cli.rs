@@ -194,6 +194,7 @@ pub enum Command {
         client_id: Option<String>,
         #[arg(long, value_name = "ПЕРЕМЕННАЯ")]
         env_var: Option<String>,
+        /// Пароль приложения. Внимание: значение попадает в историю командной строки; лучше --env-var.
         #[arg(long, value_name = "ПАРОЛЬ")]
         app_password: Option<String>,
         #[arg(long, hide = true)]
@@ -309,6 +310,13 @@ pub enum AccountCommand {
         #[arg(long)]
         disk_credential_ref: Option<String>,
     },
+    /// Переключить способ входа в Почту у существующего аккаунта (сбрасывает ссылку на секрет).
+    SetMailAuth {
+        #[arg(value_enum, value_name = "РЕЖИМ")]
+        mode: MailAuthModeArg,
+        #[arg(long, value_name = "АККАУНТ")]
+        account: Option<String>,
+    },
     List,
     Show {
         #[arg(long, value_name = "АККАУНТ")]
@@ -339,6 +347,7 @@ pub enum AuthCommand {
         client_id: Option<String>,
         #[arg(long, value_name = "ПЕРЕМЕННАЯ")]
         env_var: Option<String>,
+        /// Пароль приложения. Внимание: значение попадает в историю командной строки; лучше --env-var.
         #[arg(long, value_name = "ПАРОЛЬ")]
         app_password: Option<String>,
         #[arg(long, hide = true)]

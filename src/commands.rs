@@ -67,7 +67,9 @@ use crate::next_actions::next_actions_payload;
 use crate::oauth::{
     OauthService, default_yacli_client_id, exchange_authorization_code, start_pkce_authorization,
 };
-use crate::oauth_session_store::{PendingOauthSession, PendingOauthSessionStore};
+use crate::oauth_session_store::{
+    PendingOauthSession, discard_pending_session, find_pending_session, save_pending_session,
+};
 use crate::output::RenderedOutput;
 use crate::runtime_context::{
     auth_state, ensure_calendar_supports_app_password, resolve_calendar_private_context,
@@ -143,6 +145,20 @@ pub fn execute(cli: Cli) -> Result<RenderedOutput> {
             "mcp server mode is handled in main".to_string(),
         )),
     }
+}
+
+
+/// Persists credentials first, then runs cleanup. A cleanup failure is reported
+/// on stderr and does not fail the command or lose the saved credentials.
+fn save_credentials_then_cleanup<T>(
+    save: impl FnOnce() -> Result<T>,
+    cleanup: impl FnOnce() -> Result<()>,
+) -> Result<T> {
+    let saved = save()?;
+    if let Err(err) = cleanup() {
+        eprintln!("warning: login succeeded, but PKCE session cleanup failed: {err}");
+    }
+    Ok(saved)
 }
 
 fn execute_simple_add(
@@ -1409,10 +1425,8 @@ fn execute_auth(format: OutputFormat, action: AuthCommand) -> Result<RenderedOut
                     let client_id =
                         client_id.unwrap_or_else(|| default_yacli_client_id().to_string());
                     let resolved_login_hint = login_hint.or(Some(account.email.clone()));
-                    let mut session_store = PendingOauthSessionStore::load()?;
-                    let existing_pending = session_store
-                        .get_matching(&account_name, &services, &client_id)
-                        .cloned();
+                    let existing_pending =
+                        find_pending_session(&account_name, &services, &client_id)?;
                     let session_reused = existing_pending.is_some();
                     let mut pending_session_persisted = false;
                     let session = if let Some(pending) = existing_pending {
@@ -1425,15 +1439,14 @@ fn execute_auth(format: OutputFormat, action: AuthCommand) -> Result<RenderedOut
                             resolved_login_hint.as_deref(),
                         )?;
                         if code.is_none() {
-                            session_store.replace_matching(
+                            save_pending_session(
                                 PendingOauthSession::from_authorization_session(
                                     account_name.clone(),
                                     &services,
                                     resolved_login_hint.clone(),
                                     session.clone(),
                                 ),
-                            );
-                            session_store.save()?;
+                            )?;
                             pending_session_persisted = true;
                         }
                         session
@@ -1456,33 +1469,41 @@ fn execute_auth(format: OutputFormat, action: AuthCommand) -> Result<RenderedOut
                         None => read_confirmation_code(&session.request.authorization_url)?,
                     };
                     let login = exchange_authorization_code(session, &code)?;
-                    if pending_session_persisted {
-                        session_store.remove_matching(&account_name, &services, &client_id)?;
-                        session_store.save()?;
-                    }
-
-                    let mut credential_store = CredentialStore::load()?;
-                    let credential_refs: Vec<_> = services
-                        .iter()
-                        .map(|service| {
-                            credential_store.set_oauth(
-                                account_name.clone(),
-                                service.as_str().to_string(),
-                                login.credential.clone(),
-                            );
-                            account_store.set_service_credential_ref(
-                                &account_name,
-                                service.as_str(),
-                                Some(service.store_ref().to_string()),
-                            )?;
-                            Ok((
-                                service.as_str().to_string(),
-                                service.store_ref().to_string(),
-                            ))
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-                    credential_store.save()?;
-                    account_store.save()?;
+                    // Credentials are persisted first; only then is the PKCE
+                    // session cleaned up, and a cleanup failure never loses the token.
+                    let credential_refs: Vec<_> = save_credentials_then_cleanup(
+                        || {
+                            let mut credential_store = CredentialStore::load()?;
+                            let credential_refs = services
+                                .iter()
+                                .map(|service| {
+                                    credential_store.set_oauth(
+                                        account_name.clone(),
+                                        service.as_str().to_string(),
+                                        login.credential.clone(),
+                                    );
+                                    account_store.set_service_credential_ref(
+                                        &account_name,
+                                        service.as_str(),
+                                        Some(service.store_ref().to_string()),
+                                    )?;
+                                    Ok((
+                                        service.as_str().to_string(),
+                                        service.store_ref().to_string(),
+                                    ))
+                                })
+                                .collect::<Result<Vec<_>>>()?;
+                            credential_store.save()?;
+                            account_store.save()?;
+                            Ok(credential_refs)
+                        },
+                        || {
+                            if pending_session_persisted {
+                                discard_pending_session(&account_name, &services, &client_id)?;
+                            }
+                            Ok(())
+                        },
+                    )?;
 
                     if services.len() == 1 {
                         let service = services[0];
@@ -5903,5 +5924,42 @@ mod tests {
             lines[5],
             "42\tFri, 13 Mar 2026\tSender Name <sender@example.com>\tТема письма\t\\Seen,custom\t128"
         );
+    }
+}
+
+#[cfg(test)]
+mod login_ordering_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[test]
+    fn credentials_are_saved_before_cleanup_and_cleanup_failure_is_not_fatal() {
+        let order = RefCell::new(Vec::new());
+        let result = save_credentials_then_cleanup(
+            || {
+                order.borrow_mut().push("save");
+                Ok(42)
+            },
+            || {
+                order.borrow_mut().push("cleanup");
+                Err(YacliError::Io("keyring unavailable".to_string()))
+            },
+        );
+        assert_eq!(result.expect("command must still succeed"), 42);
+        assert_eq!(*order.borrow(), vec!["save", "cleanup"]);
+    }
+
+    #[test]
+    fn cleanup_does_not_run_when_saving_credentials_fails() {
+        let cleaned = RefCell::new(false);
+        let result: Result<()> = save_credentials_then_cleanup(
+            || Err(YacliError::Io("disk full".to_string())),
+            || {
+                *cleaned.borrow_mut() = true;
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert!(!*cleaned.borrow(), "PKCE session must survive a failed save");
     }
 }

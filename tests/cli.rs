@@ -29,16 +29,6 @@ fn read_oauth_sessions_file(config_dir: &std::path::Path) -> String {
     fs::read_to_string(config_dir.join("oauth_sessions.toml")).expect("oauth sessions file written")
 }
 
-fn expected_claude_desktop_config_path(home: &std::path::Path) -> std::path::PathBuf {
-    if cfg!(target_os = "macos") {
-        home.join("Library/Application Support/Claude/claude_desktop_config.json")
-    } else if cfg!(target_os = "windows") {
-        home.join("AppData/Roaming/Claude/claude_desktop_config.json")
-    } else {
-        home.join(".config/Claude/claude_desktop_config.json")
-    }
-}
-
 fn write_mock_account_with_refs(
     config_dir: &std::path::Path,
     disk_base_url: &str,
@@ -280,12 +270,11 @@ fn setup_help_describes_onboarding_surface() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Провести первичную настройку аккаунта и MCP за один проход",
+            "Провести первичную настройку аккаунта за один проход",
         ))
         .stdout(predicate::str::contains("--calendar-app-password <ПАРОЛЬ>"))
         .stdout(predicate::str::contains("--calendar-env-var <ПЕРЕМЕННАЯ>"))
         .stdout(predicate::str::contains("--skip-login"))
-        .stdout(predicate::str::contains("--skip-mcp-install"))
         .stdout(predicate::str::contains("--plan-only"));
 }
 
@@ -545,7 +534,6 @@ fn setup_plan_only_reports_steps_without_writing_files() {
             "me@yandex.ru",
             "--plan-only",
             "--skip-login",
-            "--skip-mcp-install",
         ])
         .assert()
         .success()
@@ -569,11 +557,7 @@ fn setup_plan_only_reports_steps_without_writing_files() {
             .iter()
             .any(|step| step["id"] == "mail_disk_login" && step["status"] == "skipped")
     );
-    assert!(
-        steps
-            .iter()
-            .any(|step| step["id"] == "mcp_install" && step["status"] == "skipped")
-    );
+    assert!(!steps.iter().any(|step| step["id"] == "mcp_install"));
     assert!(!temp.path().join("accounts.toml").exists());
 }
 
@@ -670,10 +654,7 @@ replay_command = "yacli disk upload ./report.pdf disk:/docs/report.pdf"
         ))
         .stdout(predicate::str::contains("Почта\tПодключено"))
         .stdout(predicate::str::contains("HIGHLIGHTED_WORKFLOWS"))
-        .stdout(predicate::str::contains("daily-briefing"))
-        .stdout(predicate::str::contains(
-            "yacli mcp install --client claude",
-        ));
+        .stdout(predicate::str::contains("daily-briefing"));
 }
 
 #[test]
@@ -700,13 +681,6 @@ fn doctor_reports_health_check_and_suggested_commands() {
             .expect("checks")
             .iter()
             .any(|item| item["id"] == "secret_backend")
-    );
-    assert!(
-        value["checks"]
-            .as_array()
-            .expect("checks")
-            .iter()
-            .any(|item| item["id"] == "mcp_install")
     );
     assert!(
         value["suggested_commands"]
@@ -908,92 +882,6 @@ fn home_with_goal_embeds_goal_route_and_goal_aware_next_actions() {
 }
 
 #[test]
-fn doctor_reports_installed_claude_desktop_mcp_client() {
-    let config_dir = tempdir().expect("config tempdir");
-    let home_dir = tempdir().expect("home tempdir");
-    let expected_config = expected_claude_desktop_config_path(home_dir.path());
-    fs::create_dir_all(expected_config.parent().expect("parent")).expect("create parent");
-    fs::write(
-        &expected_config,
-        r#"{
-  "mcpServers": {
-    "yacli": {
-      "command": "/Users/test/.local/bin/yacli",
-      "args": ["mcp"]
-    }
-  }
-}
-"#,
-    )
-    .expect("claude desktop config");
-
-    let output = yacli()
-        .env("YACLI_CONFIG_DIR", config_dir.path())
-        .env("HOME", home_dir.path())
-        .env("YACLI_SECRET_BACKEND", "file")
-        .args(["doctor"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let value: Value = serde_json::from_slice(&output).expect("valid json");
-    assert!(
-        value["mcp_clients"]
-            .as_array()
-            .expect("mcp clients")
-            .iter()
-            .any(|item| item["client"] == "claude-desktop" && item["status"] == "installed")
-    );
-    assert!(
-        value["checks"]
-            .as_array()
-            .expect("checks")
-            .iter()
-            .any(|item| item["id"] == "mcp_install" && item["status"] == "completed")
-    );
-}
-
-#[test]
-fn doctor_apply_safe_installs_detected_claude_desktop_registration() {
-    let config_dir = tempdir().expect("config tempdir");
-    let home_dir = tempdir().expect("home tempdir");
-    let expected_config = expected_claude_desktop_config_path(home_dir.path());
-    fs::create_dir_all(expected_config.parent().expect("parent")).expect("create parent");
-
-    let output = yacli()
-        .env("YACLI_CONFIG_DIR", config_dir.path())
-        .env("HOME", home_dir.path())
-        .env("YACLI_SECRET_BACKEND", "file")
-        .args(["doctor", "--apply-safe"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let value: Value = serde_json::from_slice(&output).expect("valid json");
-    assert_eq!(value["operation"], "doctor");
-    assert_eq!(value["safe_remediation"]["status"], "partial");
-    assert!(
-        value["safe_remediation"]["steps"]
-            .as_array()
-            .expect("steps")
-            .iter()
-            .any(|step| step["id"] == "mcp_install" && step["status"] == "applied")
-    );
-    assert!(
-        value["safe_remediation"]["doctor_after"]["mcp_clients"]
-            .as_array()
-            .expect("mcp clients")
-            .iter()
-            .any(|item| item["client"] == "claude-desktop" && item["status"] == "installed")
-    );
-    assert!(expected_config.exists());
-}
-
-#[test]
 fn doctor_apply_safe_connects_calendar_from_standard_env_var() {
     let config_dir = tempdir().expect("config tempdir");
     let home_dir = tempdir().expect("home tempdir");
@@ -1029,13 +917,13 @@ fn doctor_apply_safe_connects_calendar_from_standard_env_var() {
 fn doctor_apply_safe_records_activity_entry_with_replay() {
     let config_dir = tempdir().expect("config tempdir");
     let home_dir = tempdir().expect("home tempdir");
-    let expected_config = expected_claude_desktop_config_path(home_dir.path());
-    fs::create_dir_all(expected_config.parent().expect("parent")).expect("create parent");
+    write_mock_account_with_calendar_refs(config_dir.path(), "https://caldav.yandex.ru", None);
 
     yacli()
         .env("YACLI_CONFIG_DIR", config_dir.path())
         .env("HOME", home_dir.path())
         .env("YACLI_SECRET_BACKEND", "file")
+        .env("YACLI_CALENDAR_APP_PASSWORD", "secret")
         .args(["doctor", "--apply-safe"])
         .assert()
         .success();
@@ -1060,10 +948,9 @@ fn doctor_apply_safe_records_activity_entry_with_replay() {
 }
 
 #[test]
-fn setup_skip_login_can_connect_calendar_and_install_claude_desktop() {
+fn setup_skip_login_can_connect_calendar() {
     let config_dir = tempdir().expect("config tempdir");
     let home_dir = tempdir().expect("home tempdir");
-    let expected_config = expected_claude_desktop_config_path(home_dir.path());
 
     let output = yacli()
         .env("YACLI_CONFIG_DIR", config_dir.path())
@@ -1075,8 +962,6 @@ fn setup_skip_login_can_connect_calendar_and_install_claude_desktop() {
             "--skip-login",
             "--calendar-env-var",
             "YACLI_CALENDAR_APP_PASSWORD",
-            "--client",
-            "claude-desktop",
         ])
         .assert()
         .success()
@@ -1103,13 +988,7 @@ fn setup_skip_login_can_connect_calendar_and_install_claude_desktop() {
             .iter()
             .any(|step| step["id"] == "calendar_login" && step["status"] == "completed")
     );
-    let install_step = steps
-        .iter()
-        .find(|step| step["id"] == "mcp_install")
-        .expect("mcp install step");
-    assert_eq!(install_step["status"], "completed");
-    assert_eq!(install_step["output"]["operation"], "mcp.install");
-    assert!(expected_config.exists());
+    assert!(!steps.iter().any(|step| step["id"] == "mcp_install"));
 }
 
 #[test]
@@ -1122,7 +1001,6 @@ fn setup_is_idempotent_for_existing_account() {
             "setup",
             "me@yandex.ru",
             "--skip-login",
-            "--skip-mcp-install",
         ])
         .assert()
         .success();
@@ -1133,7 +1011,6 @@ fn setup_is_idempotent_for_existing_account() {
             "setup",
             "me@yandex.ru",
             "--skip-login",
-            "--skip-mcp-install",
         ])
         .assert()
         .success()
@@ -2197,7 +2074,7 @@ fn setup_surfaces_pending_mail_disk_login_for_agents() {
 
     let output = yacli()
         .env("YACLI_CONFIG_DIR", config_dir.path())
-        .args(["setup", "me@yandex.ru", "--skip-mcp-install"])
+        .args(["setup", "me@yandex.ru"])
         .assert()
         .success()
         .get_output()

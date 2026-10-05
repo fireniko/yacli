@@ -81,7 +81,7 @@ cargo build --release                  # бинарник: target/release/yacli 
 
 ```bash
 cargo build --release
-yacli setup me@yandex.ru --calendar-app-password <пароль> --client claude
+yacli setup me@yandex.ru --calendar-app-password <пароль>
 ```
 
 После этого у вас сразу будут:
@@ -105,10 +105,10 @@ yacli setup me@yandex.ru --calendar-app-password <пароль> --client claude
 
 | Если вам нужно | Что делать |
 | --- | --- |
-| **Пройти setup одним проходом** | `yacli setup me@yandex.ru --calendar-app-password <пароль> --client claude` |
+| **Пройти setup одним проходом** | `yacli setup me@yandex.ru --calendar-app-password <пароль>` |
 | **Быстро подключить Почту и Диск** | `yacli add` → `yacli login` |
 | **Подключить Календарь** | получить пароль приложения Яндекс ID → `yacli login calendar --app-password <пароль>` |
-| **Поставить MCP в Claude / Codex / Gemini** | `yacli mcp install --client <client>` |
+| **Подключить MCP к Claude / Codex** | вручную, см. «Подключение к клиентам» |
 | **Поднять локальный HTTP MCP** | `yacli mcp --transport http --listen 127.0.0.1:8787` |
 
 Для агентских и headless-сценариев `yacli login` теперь работает в два шага без ломкого `stdin`-диалога:
@@ -400,19 +400,16 @@ yacli mcp --transport http --listen 127.0.0.1:8787           # HTTP
 
 `stdio` автоматически совместим с `Content-Length` framing и line-delimited JSON — один бинарник работает и в старых, и в новых клиентах.
 
-### Установка в клиенты
+### Подключение к клиентам
+
+Команда `yacli mcp install` удалена в этом форке: она правила конфиги клиентов и записывала файлы skills. Клиент подключается вручную к собранному бинарнику:
 
 ```bash
-yacli mcp install                          # все обнаруженные клиенты
-yacli mcp install --client claude          # Claude Code + Claude Desktop
-yacli mcp install --client codex           # Codex
-yacli mcp install --client gemini          # Gemini CLI
-yacli mcp install --client cursor          # Cursor
+claude mcp add yandex-mail --scope user -- <путь>/yacli mcp      # Claude Code
+# Codex: ~/.codex/config.toml -> [mcp_servers.yandex-mail], command = "<путь>/yacli", args = ["mcp"]
 ```
 
-Регистрирует MCP server и раскладывает 13 embedded skills в клиентские каталоги.
-
-Поддерживаемые клиенты: Claude Code, Claude Desktop / Cowork, Codex, Gemini CLI, Cursor, Zed, Windsurf, Antigravity, Warp.
+Встроенные skills по-прежнему отдаются только по запросу клиента через MCP prompts и `resource://yacli/skills`; на диск они не записываются.
 
 ### Что получает MCP-клиент
 
@@ -465,13 +462,6 @@ Public URL для прокси:
 yacli mcp --transport http --listen 127.0.0.1:8787 --public-url https://mcp.example.test/mcp
 ```
 
-Native HTTP registration:
-
-```bash
-yacli mcp install --client claude --transport http --url http://127.0.0.1:8787/mcp
-yacli mcp install --client codex --transport http --url http://127.0.0.1:8787/mcp
-yacli mcp install --client gemini --transport http --url http://127.0.0.1:8787/mcp
-```
 
 </details>
 
@@ -556,15 +546,11 @@ MCP Apps доступны через `ui://yacli/dashboard`:
 <details>
 <summary><strong>Поведение по клиентам</strong></summary>
 
-- `Claude Code`, `Codex` и `Gemini CLI` умеют native HTTP registration — `yacli` поддерживает и `stdio`, и `http` install flow;
-- `Claude Desktop / Cowork` использует `claude_desktop_config.json` — `yacli mcp install --client claude` регистрирует и в Claude Code, и в Claude Desktop;
-- для `Cursor`, `Zed`, `Windsurf`, `Warp` и `Antigravity` install path остаётся `stdio`-ориентированным;
-- skills устанавливаются для Claude Code, Codex, Gemini CLI, Cursor, Windsurf, Warp и Antigravity; для Zed MCP registration без skills surface;
+- регистрация в MCP-клиентах выполняется вручную: команда `yacli mcp install` и запись skills в каталоги клиентов удалены в этом форке;
 - Claude Desktop / Cowork получает workflows через MCP prompts (без `SKILL.md`);
 - `stdio` автоматически согласует framing между `Content-Length` и JSONL;
 - `roots` capability: `tools/list` рекламирует `yacli.roots.list`, `notifications/roots/list_changed` инвалидирует кеш;
 - HTTP SSE: `POST /mcp` с `Accept: text/event-stream` — nested `roots/list` + финальный result;
-- `yacli mcp install` не копирует секреты в клиентские конфиги;
 - обычные текстовые MCP-клиенты работают без UI.
 
 </details>

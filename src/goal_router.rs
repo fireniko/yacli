@@ -602,11 +602,6 @@ fn default_if_empty(value: &str, fallback: &str) -> String {
 
 fn remediation_payload(best_match: Option<&Value>, onboarding: &Value, doctor: &Value) -> Value {
     let current_account = doctor["current_account"].clone();
-    let mcp_installed = doctor["mcp_clients"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .any(|item| item["status"] == "installed");
 
     let Some(best_match) = best_match else {
         return json!({
@@ -615,7 +610,6 @@ fn remediation_payload(best_match: Option<&Value>, onboarding: &Value, doctor: &
             "required_services": [],
             "service_states": {},
             "actions": next_fallback_actions(onboarding, doctor),
-            "mcp_installed": mcp_installed,
         });
     };
 
@@ -663,7 +657,6 @@ fn remediation_payload(best_match: Option<&Value>, onboarding: &Value, doctor: &
         "required_services": required_services,
         "service_states": service_states,
         "actions": actions,
-        "mcp_installed": mcp_installed,
     })
 }
 

@@ -3752,88 +3752,6 @@ fn mcp_stdio_goal_route_tool_matches_invite_workflow_for_russian_goal() {
 }
 
 #[test]
-fn mcp_stdio_doctor_apply_safe_tool_installs_detected_claude_desktop() {
-    let config_dir = tempdir().expect("config tempdir");
-    let home_dir = tempdir().expect("home tempdir");
-    let expected_config = if cfg!(target_os = "macos") {
-        home_dir
-            .path()
-            .join("Library/Application Support/Claude/claude_desktop_config.json")
-    } else if cfg!(target_os = "windows") {
-        home_dir
-            .path()
-            .join("AppData/Roaming/Claude/claude_desktop_config.json")
-    } else {
-        home_dir
-            .path()
-            .join(".config/Claude/claude_desktop_config.json")
-    };
-    fs::create_dir_all(expected_config.parent().expect("parent")).expect("create parent");
-
-    let input = [
-        initialize_request(true),
-        mcp_request(
-            2,
-            "tools/call",
-            json!({
-                "name": "yacli.doctor.apply_safe",
-                "arguments": {}
-            }),
-        ),
-        mcp_request(
-            3,
-            "resources/read",
-            json!({
-                "uri": "resource://yacli/activity"
-            }),
-        ),
-    ]
-    .join("");
-
-    let output = yacli()
-        .env("YACLI_CONFIG_DIR", config_dir.path())
-        .env("HOME", home_dir.path())
-        .args(["mcp"])
-        .write_stdin(input)
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let responses = parse_responses(&output);
-    let response = &responses[1]["result"]["structuredContent"];
-    assert_eq!(response["status"], "partial");
-    assert!(
-        response["doctor_after"]["mcp_clients"]
-            .as_array()
-            .expect("mcp clients")
-            .iter()
-            .any(|item| item["client"] == "claude-desktop" && item["status"] == "installed")
-    );
-    let activity_contents = responses[2]["result"]["contents"]
-        .as_array()
-        .expect("activity contents");
-    let activity_payload: Value = serde_json::from_str(
-        activity_contents[0]["text"]
-            .as_str()
-            .expect("activity text"),
-    )
-    .expect("activity json");
-    assert_eq!(
-        activity_payload["items"][0]["operation"],
-        "doctor.apply_safe"
-    );
-    assert_eq!(activity_payload["items"][0]["source"], "mcp");
-    assert_eq!(
-        activity_payload["items"][0]["replay_command"],
-        "yacli doctor --apply-safe"
-    );
-    assert!(expected_config.exists());
-}
-
-
-#[test]
 fn mcp_stdio_lists_resource_templates_and_reads_templated_resources() {
     let temp = tempdir().expect("tempdir");
     let home = tempdir().expect("home tempdir");
@@ -4217,13 +4135,6 @@ rest_base_url = "https://cloud-api.yandex.net"
             .iter()
             .any(|item| item["id"] == "account")
     );
-    assert!(
-        onboarding_payload["checks"]
-            .as_array()
-            .expect("checks")
-            .iter()
-            .any(|item| item["id"] == "mcp_install")
-    );
 
     let doctor_contents = responses[10]["result"]["contents"]
         .as_array()
@@ -4238,13 +4149,6 @@ rest_base_url = "https://cloud-api.yandex.net"
             .expect("doctor checks")
             .iter()
             .any(|item| item["id"] == "secret_backend")
-    );
-    assert!(
-        doctor_payload["checks"]
-            .as_array()
-            .expect("doctor checks")
-            .iter()
-            .any(|item| item["id"] == "mcp_install")
     );
 
     let home_contents = responses[11]["result"]["contents"]
@@ -4283,13 +4187,7 @@ rest_base_url = "https://cloud-api.yandex.net"
             .expect("next actions text"),
     )
     .expect("next actions json");
-    assert!(
-        next_actions_payload["actions"]
-            .as_array()
-            .expect("actions")
-            .iter()
-            .any(|item| item["id"] == "mcp_install")
-    );
+    assert!(next_actions_payload["actions"].is_array());
 
     let goal_home_contents = responses[14]["result"]["contents"]
         .as_array()

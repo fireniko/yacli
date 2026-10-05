@@ -11,7 +11,6 @@ fn main() {
         transport,
         listen,
         public_url,
-        action: None,
     } = &cli.command
     {
         let result = match transport {

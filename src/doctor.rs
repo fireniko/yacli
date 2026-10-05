@@ -5,7 +5,6 @@ use crate::activity_store::ActivityStore;
 use crate::credential_store::{CredentialStore, configured_secret_backend_name};
 use crate::error::Result;
 use crate::goal_router::goal_route_payload;
-use crate::mcp::install::mcp_client_readiness;
 use crate::onboarding::onboarding_resource_payload;
 use crate::paths::{accounts_path, activity_log_path, config_dir, credentials_path};
 use crate::runtime_context::auth_state;
@@ -18,7 +17,6 @@ pub fn doctor_payload(requested_account: Option<&str>, goal: Option<&str>) -> Re
     let secret_backend = configured_secret_backend_name()?;
     let normalized_goal = normalize_goal(goal);
     let onboarding = onboarding_resource_payload(normalized_goal.as_deref())?;
-    let mcp_clients = mcp_client_readiness()?;
     let account_store = AccountStore::load()?;
     let activity_store = ActivityStore::load()?;
     let current_account_name = account_store.current_account_name().ok();
@@ -51,7 +49,6 @@ pub fn doctor_payload(requested_account: Option<&str>, goal: Option<&str>) -> Re
             "yacli activity list",
         ),
         secret_backend_check(secret_backend, credentials_path.exists()),
-        mcp_install_check(&mcp_clients),
     ];
 
     let mut current_account = Value::Null;
@@ -158,7 +155,6 @@ pub fn doctor_payload(requested_account: Option<&str>, goal: Option<&str>) -> Re
         "email": email,
         "services": services,
         "checks": checks,
-        "mcp_clients": mcp_clients,
         "onboardingStatus": onboarding["status"].clone(),
         "suggested_commands": suggested_commands,
     }))
@@ -236,51 +232,6 @@ fn service_check(
         "status": status,
         "detail": detail,
         "recommended_command": command,
-    })
-}
-
-fn mcp_install_check(clients: &[crate::mcp::install::ClientReadiness]) -> Value {
-    let installed = clients
-        .iter()
-        .filter(|client| client.status == "installed")
-        .count();
-    let available = clients
-        .iter()
-        .filter(|client| {
-            matches!(
-                client.status,
-                "installed" | "not_installed" | "available_unverifiable"
-            )
-        })
-        .count();
-    let detail = if installed > 0 {
-        let names = clients
-            .iter()
-            .filter(|client| client.status == "installed")
-            .map(|client| client.client)
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("yacli уже зарегистрирован в следующих клиентах: {names}")
-    } else if available > 0 {
-        "Совместимые MCP-клиенты обнаружены, но yacli ещё не зарегистрирован ни в одном из них."
-            .to_string()
-    } else {
-        "Совместимые MCP-клиенты не обнаружены локально. Можно продолжать через CLI или поднять HTTP/stdio MCP вручную."
-            .to_string()
-    };
-
-    json!({
-        "id": "mcp_install",
-        "title": "Установка MCP-клиентов",
-        "status": if installed > 0 {
-            "completed"
-        } else if available > 0 {
-            "pending"
-        } else {
-            "attention"
-        },
-        "detail": detail,
-        "recommended_command": "yacli mcp install --client claude",
     })
 }
 

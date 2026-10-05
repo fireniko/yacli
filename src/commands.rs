@@ -20,7 +20,7 @@ use crate::calendar::{
 use crate::cli::{
     AccountCommand, ActivityCommand, AuthCommand, AuthServiceArg, CalendarCommand, Cli, Command,
     DiskCommand, DiskPublicCommand, GuideTopicArg, MailAttachmentCommand, MailCommand,
-    MailInviteCommand, McpClientArg, McpCommand, McpTransportArg, OutputFormat, WorkflowCommand,
+    MailInviteCommand, OutputFormat, WorkflowCommand,
 };
 use crate::credential_store::{CredentialStore, StoredAppPasswordCredential};
 use crate::disk::{
@@ -62,7 +62,6 @@ use crate::mail_link::{
     review_mail_send_link, review_mail_send_published_link, send_link_via_mail,
     send_published_link_command, send_published_link_via_mail,
 };
-use crate::mcp::install::execute_install;
 use crate::model::{AccountConfig, CalendarAuthMode, DiskAuthMode, MailAuthMode, NewAccountInput};
 use crate::next_actions::next_actions_payload;
 use crate::oauth::{
@@ -86,11 +85,7 @@ pub fn execute(cli: Cli) -> Result<RenderedOutput> {
             name,
             calendar_app_password,
             calendar_env_var,
-            client,
-            mcp_transport,
-            mcp_url,
             skip_login,
-            skip_mcp_install,
             plan_only,
         } => execute_setup(
             cli.format,
@@ -99,11 +94,7 @@ pub fn execute(cli: Cli) -> Result<RenderedOutput> {
                 name,
                 calendar_app_password,
                 calendar_env_var,
-                clients: client,
-                mcp_transport,
-                mcp_url,
                 skip_login,
-                skip_mcp_install,
                 plan_only,
             },
         ),
@@ -148,16 +139,7 @@ pub fn execute(cli: Cli) -> Result<RenderedOutput> {
         Command::Disk { action } => execute_disk(cli.format, action),
         Command::Calendar { action } => execute_calendar(cli.format, action),
         Command::Mail { action } => execute_mail(cli.format, action),
-        Command::Mcp {
-            action:
-                Some(McpCommand::Install {
-                    client,
-                    transport,
-                    url,
-                }),
-            ..
-        } => execute_install(cli.format, client, transport, url),
-        Command::Mcp { action: None, .. } => Err(YacliError::UnsupportedOperation(
+        Command::Mcp { .. } => Err(YacliError::UnsupportedOperation(
             "mcp server mode is handled in main".to_string(),
         )),
     }
@@ -198,11 +180,7 @@ struct SetupRequest {
     name: Option<String>,
     calendar_app_password: Option<String>,
     calendar_env_var: Option<String>,
-    clients: Vec<McpClientArg>,
-    mcp_transport: McpTransportArg,
-    mcp_url: Option<String>,
     skip_login: bool,
-    skip_mcp_install: bool,
     plan_only: bool,
 }
 
@@ -221,11 +199,7 @@ fn execute_setup(format: OutputFormat, request: SetupRequest) -> Result<Rendered
         name,
         calendar_app_password,
         calendar_env_var,
-        clients,
-        mcp_transport,
-        mcp_url,
         skip_login,
-        skip_mcp_install,
         plan_only,
     } = request;
 
@@ -260,7 +234,7 @@ fn execute_setup(format: OutputFormat, request: SetupRequest) -> Result<Rendered
         output: None,
     }];
 
-    let mut exit_code = 0;
+    let exit_code = 0;
     let mut next_actions = Vec::new();
 
     if plan_only {
@@ -290,23 +264,6 @@ fn execute_setup(format: OutputFormat, request: SetupRequest) -> Result<Rendered
                 format!("will connect calendar from env var `{env_var}`")
             } else {
                 "calendar still needs `--calendar-app-password` or `--calendar-env-var`".to_string()
-            },
-            output: None,
-        });
-        steps.push(SetupStep {
-            id: "mcp_install",
-            status: if skip_mcp_install {
-                "skipped"
-            } else {
-                "planned"
-            },
-            detail: if skip_mcp_install {
-                "mcp install was skipped by request".to_string()
-            } else {
-                format!(
-                    "will register MCP via `{}` transport",
-                    mcp_transport.label()
-                )
             },
             output: None,
         });
@@ -413,36 +370,6 @@ fn execute_setup(format: OutputFormat, request: SetupRequest) -> Result<Rendered
             next_actions.push(
                 "run `yacli login calendar --app-password <пароль>` or `yacli setup --calendar-app-password <пароль>`",
             );
-        }
-
-        if skip_mcp_install {
-            steps.push(SetupStep {
-                id: "mcp_install",
-                status: "skipped",
-                detail: "mcp install was skipped by request".to_string(),
-                output: None,
-            });
-            next_actions.push("run `yacli mcp install` when you are ready to register the server");
-        } else {
-            let install = execute_install(OutputFormat::Json, clients, mcp_transport, mcp_url)?;
-            if install.exit_code != 0 {
-                exit_code = install.exit_code;
-            }
-            steps.push(SetupStep {
-                id: "mcp_install",
-                status: if install.exit_code == 0 {
-                    "completed"
-                } else {
-                    "partial"
-                },
-                detail: if install.exit_code == 0 {
-                    "mcp server registration completed".to_string()
-                } else {
-                    "mcp install completed with partial failures; inspect items in output"
-                        .to_string()
-                },
-                output: Some(install.json),
-            });
         }
     }
 
@@ -997,76 +924,6 @@ pub fn apply_safe_doctor_remediation(
         }
     }
 
-    if let Some(check) = doctor_check(&doctor_before, "mcp_install")
-        && check["status"] != "completed"
-    {
-        let clients = safe_doctor_install_clients(
-            doctor_before["mcp_clients"]
-                .as_array()
-                .map(Vec::as_slice)
-                .unwrap_or(&[]),
-        );
-        if clients.is_empty() {
-            steps.push(remediation_step(
-                "mcp_install",
-                "Установка MCP-клиентов",
-                "needs_input",
-                "Нет проверяемых config-based клиентов для безопасной автоматической установки. Native CLI-клиенты оставлены как явный ручной шаг."
-                    .to_string(),
-                check["recommended_command"].as_str().map(ToString::to_string),
-                None,
-            ));
-            needs_input_count += 1;
-        } else {
-            let command = format!(
-                "yacli mcp install{}",
-                clients
-                    .iter()
-                    .map(|client| format!(" --client {}", mcp_client_label(*client)))
-                    .collect::<String>()
-            );
-            match execute_install(OutputFormat::Json, clients, McpTransportArg::Stdio, None) {
-                Ok(output) => {
-                    let status = if output.exit_code == 0 {
-                        applied_count += 1;
-                        "applied"
-                    } else {
-                        failed_count += 1;
-                        "failed"
-                    };
-                    steps.push(remediation_step(
-                        "mcp_install",
-                        "Установка MCP-клиентов",
-                        status,
-                        format!(
-                            "Safe remediation применил MCP install для config-based клиентов: {}.",
-                            output.json["items"]
-                                .as_array()
-                                .into_iter()
-                                .flatten()
-                                .map(|item| item["client"].as_str().unwrap_or_default())
-                                .filter(|label| !label.is_empty())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ),
-                        Some(command),
-                        Some(output.json),
-                    ));
-                }
-                Err(err) => {
-                    steps.push(remediation_step(
-                        "mcp_install",
-                        "Установка MCP-клиентов",
-                        "failed",
-                        format!("Не удалось применить safe MCP install: {err}"),
-                        Some(command),
-                        None,
-                    ));
-                    failed_count += 1;
-                }
-            }
-        }
-    }
 
     let doctor_after = doctor_payload(account, goal)?;
     let status = if failed_count > 0 {
@@ -1169,52 +1026,6 @@ fn remediation_step(
         "command": command,
         "output": output,
     })
-}
-
-fn safe_doctor_install_clients(clients: &[serde_json::Value]) -> Vec<McpClientArg> {
-    let mut selected = Vec::new();
-    for client in clients {
-        let mechanism = client["mechanism"].as_str().unwrap_or_default();
-        let status = client["status"].as_str().unwrap_or_default();
-        let experimental = client["experimental"].as_bool().unwrap_or(false);
-        if mechanism != "json_file" || status != "not_installed" || experimental {
-            continue;
-        }
-        if let Some(arg) = mcp_client_arg_from_label(client["client"].as_str().unwrap_or_default())
-        {
-            selected.push(arg);
-        }
-    }
-    selected
-}
-
-fn mcp_client_arg_from_label(label: &str) -> Option<McpClientArg> {
-    match label {
-        "claude" => Some(McpClientArg::Claude),
-        "claude-desktop" => Some(McpClientArg::ClaudeDesktop),
-        "codex" => Some(McpClientArg::Codex),
-        "gemini" => Some(McpClientArg::Gemini),
-        "warp" => Some(McpClientArg::Warp),
-        "zed" => Some(McpClientArg::Zed),
-        "cursor" => Some(McpClientArg::Cursor),
-        "antigravity" => Some(McpClientArg::Antigravity),
-        "windsurf" => Some(McpClientArg::Windsurf),
-        _ => None,
-    }
-}
-
-fn mcp_client_label(client: McpClientArg) -> &'static str {
-    match client {
-        McpClientArg::Claude => "claude",
-        McpClientArg::ClaudeDesktop => "claude-desktop",
-        McpClientArg::Codex => "codex",
-        McpClientArg::Gemini => "gemini",
-        McpClientArg::Warp => "warp",
-        McpClientArg::Zed => "zed",
-        McpClientArg::Cursor => "cursor",
-        McpClientArg::Antigravity => "antigravity",
-        McpClientArg::Windsurf => "windsurf",
-    }
 }
 
 fn record_activity_best_effort(entry: NewActivityEntry) {

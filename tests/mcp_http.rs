@@ -4437,13 +4437,6 @@ rest_base_url = "https://cloud-api.yandex.net"
             .iter()
             .any(|item| item["id"] == "workflow_hub")
     );
-    assert!(
-        onboarding_json["checks"]
-            .as_array()
-            .expect("onboarding checks")
-            .iter()
-            .any(|item| item["id"] == "mcp_install")
-    );
 
     let doctor_resource = post_json(
         &client,
@@ -4474,13 +4467,6 @@ rest_base_url = "https://cloud-api.yandex.net"
             .expect("doctor checks")
             .iter()
             .any(|item| item["id"] == "secret_backend")
-    );
-    assert!(
-        doctor_json["checks"]
-            .as_array()
-            .expect("doctor checks")
-            .iter()
-            .any(|item| item["id"] == "mcp_install")
     );
 
     let home_resource = post_json(
@@ -4568,13 +4554,7 @@ rest_base_url = "https://cloud-api.yandex.net"
             .expect("next actions text"),
     )
     .expect("next actions payload");
-    assert!(
-        next_actions_json["actions"]
-            .as_array()
-            .expect("actions")
-            .iter()
-            .any(|item| item["id"] == "mcp_install")
-    );
+    assert!(next_actions_json["actions"].is_array());
 
     let goal_home_resource = post_json(
         &client,
@@ -4938,120 +4918,3 @@ fn mcp_http_goal_route_tool_matches_invite_workflow_for_russian_goal() {
     assert!(payload["result"]["structuredContent"]["remediation"].is_object());
 }
 
-#[test]
-fn mcp_http_doctor_apply_safe_tool_installs_detected_claude_desktop() {
-    let config_dir = tempfile::tempdir().expect("config tempdir");
-    let home_dir = tempfile::tempdir().expect("home tempdir");
-    let expected_config = if cfg!(target_os = "macos") {
-        home_dir
-            .path()
-            .join("Library/Application Support/Claude/claude_desktop_config.json")
-    } else if cfg!(target_os = "windows") {
-        home_dir
-            .path()
-            .join("AppData/Roaming/Claude/claude_desktop_config.json")
-    } else {
-        home_dir
-            .path()
-            .join(".config/Claude/claude_desktop_config.json")
-    };
-    std::fs::create_dir_all(expected_config.parent().expect("parent")).expect("create parent");
-
-    let server = TestHttpServer::spawn_with_envs(&[
-        (
-            "YACLI_CONFIG_DIR",
-            config_dir.path().to_str().expect("config dir"),
-        ),
-        ("HOME", home_dir.path().to_str().expect("home dir")),
-    ]);
-    let client = client();
-
-    let initialize = post_json(
-        &client,
-        &server.url(),
-        json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-11-25",
-                "capabilities": {
-                    "extensions": {
-                        "io.modelcontextprotocol/ui": {
-                            "mimeTypes": [APP_RESOURCE_MIME_TYPE]
-                        }
-                    }
-                },
-                "clientInfo": { "name": "http-test", "version": "0.1.0" }
-            }
-        }),
-        None,
-        None,
-    );
-    assert!(initialize.status().is_success());
-    let session_id = initialize
-        .headers()
-        .get("Mcp-Session-Id")
-        .expect("session header")
-        .to_str()
-        .expect("session id")
-        .to_string();
-
-    let response = post_json(
-        &client,
-        &server.url(),
-        json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/call",
-            "params": {
-                "name": "yacli.doctor.apply_safe",
-                "arguments": {}
-            }
-        }),
-        Some(&session_id),
-        None,
-    );
-    assert!(response.status().is_success());
-    let payload: Value = response.json().expect("tools/call json");
-    assert_eq!(payload["result"]["structuredContent"]["status"], "partial");
-    assert!(
-        payload["result"]["structuredContent"]["doctor_after"]["mcp_clients"]
-            .as_array()
-            .expect("mcp clients")
-            .iter()
-            .any(|item| item["client"] == "claude-desktop" && item["status"] == "installed")
-    );
-    let activity_resource = post_json(
-        &client,
-        &server.url(),
-        json!({
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "resources/read",
-            "params": {
-                "uri": "resource://yacli/activity"
-            }
-        }),
-        Some(&session_id),
-        None,
-    );
-    assert!(activity_resource.status().is_success());
-    let activity_resource_payload: Value = activity_resource.json().expect("activity resource");
-    let activity_contents = activity_resource_payload["result"]["contents"]
-        .as_array()
-        .expect("activity contents");
-    let activity_json: Value = serde_json::from_str(
-        activity_contents[0]["text"]
-            .as_str()
-            .expect("activity text"),
-    )
-    .expect("activity payload");
-    assert_eq!(activity_json["items"][0]["operation"], "doctor.apply_safe");
-    assert_eq!(activity_json["items"][0]["source"], "mcp");
-    assert_eq!(
-        activity_json["items"][0]["replay_command"],
-        "yacli doctor --apply-safe"
-    );
-    assert!(expected_config.exists());
-}

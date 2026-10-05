@@ -1,7 +1,4 @@
-use std::fs;
-use std::path::Path;
 
-use crate::error::{Result, YacliError};
 
 struct Skill {
     name: &'static str,
@@ -106,28 +103,6 @@ pub fn prompt_skill_name(prompt_name: &str) -> Option<&'static str> {
     })
 }
 
-/// Write all embedded skills to `target_dir/<skill-name>/SKILL.md`.
-/// Returns the number of skills written.
-pub fn install_skills(target_dir: &Path) -> Result<usize> {
-    for skill in SKILLS {
-        let skill_dir = target_dir.join(skill.name);
-        fs::create_dir_all(&skill_dir).map_err(|err| {
-            YacliError::Io(format!(
-                "failed to create skill directory {}: {err}",
-                skill_dir.display()
-            ))
-        })?;
-        let skill_path = skill_dir.join("SKILL.md");
-        fs::write(&skill_path, skill.content).map_err(|err| {
-            YacliError::Io(format!(
-                "failed to write skill {}: {err}",
-                skill_path.display()
-            ))
-        })?;
-    }
-    Ok(SKILLS.len())
-}
-
 fn parse_frontmatter_description(content: &str) -> Option<String> {
     let frontmatter = content
         .strip_prefix("---\n")?
@@ -143,7 +118,6 @@ fn parse_frontmatter_description(content: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
 
     #[test]
     fn skill_count_matches_constant() {
@@ -257,34 +231,6 @@ mod tests {
                 desc.len()
             );
             assert!(!desc.is_empty(), "{}: description is empty", skill.name);
-        }
-    }
-
-    #[test]
-    fn install_skills_writes_all_files() {
-        let temp = tempdir().expect("tempdir");
-        let count = install_skills(temp.path()).expect("install");
-        assert_eq!(count, SKILL_COUNT);
-
-        for skill in SKILLS {
-            let path = temp.path().join(skill.name).join("SKILL.md");
-            assert!(path.exists(), "{}/SKILL.md not found", skill.name);
-            let content = fs::read_to_string(&path).expect("read");
-            assert_eq!(content, skill.content);
-        }
-    }
-
-    #[test]
-    fn install_skills_is_idempotent() {
-        let temp = tempdir().expect("tempdir");
-        install_skills(temp.path()).expect("first install");
-        let count = install_skills(temp.path()).expect("second install");
-        assert_eq!(count, SKILL_COUNT);
-
-        for skill in SKILLS {
-            let path = temp.path().join(skill.name).join("SKILL.md");
-            let content = fs::read_to_string(&path).expect("read");
-            assert_eq!(content, skill.content);
         }
     }
 

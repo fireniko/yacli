@@ -4,13 +4,11 @@ use crate::account_store::AccountStore;
 use crate::credential_store::CredentialStore;
 use crate::error::Result;
 use crate::goal_router::goal_route_payload;
-use crate::mcp::install::mcp_client_readiness;
 use crate::runtime_context::auth_state;
 
 pub fn onboarding_resource_payload(goal: Option<&str>) -> Result<Value> {
     let account_store = AccountStore::load()?;
     let credential_store = CredentialStore::load()?;
-    let mcp_clients = mcp_client_readiness()?;
     let current_account = account_store.current_account_name().ok();
     let goal = normalize_goal(goal);
     let goal_route = if let Some(goal) = goal.as_deref() {
@@ -41,13 +39,6 @@ pub fn onboarding_resource_payload(goal: Option<&str>) -> Result<Value> {
                 "status": "blocked",
                 "detail": "Календарь подключается после добавления аккаунта и пароля приложения.",
                 "recommended_command": "yacli setup me@yandex.ru --calendar-app-password <пароль>"
-            }),
-            json!({
-                "id": "mcp_install",
-                "title": "Подключить MCP-клиент",
-                "status": "blocked",
-                "detail": "MCP имеет смысл ставить после базового setup аккаунта.",
-                "recommended_command": "yacli mcp install --client claude"
             }),
             json!({
                 "id": "workflow_hub",
@@ -133,7 +124,6 @@ pub fn onboarding_resource_payload(goal: Option<&str>) -> Result<Value> {
             calendar.credential_state,
             disk.credential_state,
         ),
-        mcp_install_check(&mcp_clients),
     ];
 
     let completed = checks
@@ -157,7 +147,6 @@ pub fn onboarding_resource_payload(goal: Option<&str>) -> Result<Value> {
         "account_count": account_store.file.accounts.len(),
         "current_account": account_name,
         "checks": checks,
-        "mcp_clients": mcp_clients,
     }))
 }
 
@@ -225,53 +214,6 @@ fn workflow_hub_check(mail: &str, calendar: &str, disk: &str) -> Value {
         status,
         detail.to_string(),
         Some("yacli workflow list".to_string()),
-    )
-}
-
-fn mcp_install_check(clients: &[crate::mcp::install::ClientReadiness]) -> Value {
-    let installed = clients
-        .iter()
-        .filter(|client| client.status == "installed")
-        .count();
-    let available = clients
-        .iter()
-        .filter(|client| {
-            matches!(
-                client.status,
-                "installed" | "not_installed" | "available_unverifiable"
-            )
-        })
-        .count();
-    let (status, detail) = if installed > 0 {
-        let names = clients
-            .iter()
-            .filter(|client| client.status == "installed")
-            .map(|client| client.client)
-            .collect::<Vec<_>>()
-            .join(", ");
-        (
-            "completed",
-            format!("yacli уже установлен в MCP-клиентах: {names}"),
-        )
-    } else if available > 0 {
-        (
-            "pending",
-            "Подключите хотя бы один MCP-клиент, чтобы workflows и Apps работали в агентских хостах."
-                .to_string(),
-        )
-    } else {
-        (
-            "attention",
-            "Совместимые MCP-клиенты локально не обнаружены. Можно продолжать через CLI или поднять MCP вручную."
-                .to_string(),
-        )
-    };
-    auth_check(
-        "mcp_install",
-        "Подключить MCP-клиент",
-        status,
-        detail,
-        Some("yacli mcp install --client claude".to_string()),
     )
 }
 

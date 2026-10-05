@@ -41,19 +41,6 @@ pub enum GuideTopicArg {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub enum McpClientArg {
-    Claude,
-    ClaudeDesktop,
-    Codex,
-    Gemini,
-    Warp,
-    Zed,
-    Cursor,
-    Antigravity,
-    Windsurf,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum McpTransportArg {
     Stdio,
     Http,
@@ -109,7 +96,7 @@ pub enum Command {
         #[arg(value_name = "ПСЕВДОНИМ")]
         name: Option<String>,
     },
-    /// Провести первичную настройку аккаунта и MCP за один проход.
+    /// Провести первичную настройку аккаунта за один проход.
     Setup {
         #[arg(value_name = "EMAIL")]
         email: Option<String>,
@@ -119,30 +106,12 @@ pub enum Command {
         calendar_app_password: Option<String>,
         #[arg(long, value_name = "ПЕРЕМЕННАЯ")]
         calendar_env_var: Option<String>,
-        #[arg(long = "client", value_enum, value_name = "КЛИЕНТ")]
-        client: Vec<McpClientArg>,
-        #[arg(
-            long,
-            value_enum,
-            default_value_t = McpTransportArg::Stdio,
-            value_name = "ТРАНСПОРТ",
-            help = "Какой транспорт регистрировать при setup"
-        )]
-        mcp_transport: McpTransportArg,
-        #[arg(
-            long,
-            value_name = "URL",
-            help = "URL MCP HTTP сервера, если выбран HTTP transport"
-        )]
-        mcp_url: Option<String>,
         #[arg(
             long,
             default_value_t = false,
             help = "Не выполнять OAuth login для Почты и Диска"
         )]
         skip_login: bool,
-        #[arg(long, default_value_t = false, help = "Не выполнять `mcp install`")]
-        skip_mcp_install: bool,
         #[arg(
             long,
             default_value_t = false,
@@ -264,7 +233,7 @@ pub enum Command {
         #[command(subcommand)]
         action: MailCommand,
     },
-    /// Запустить MCP сервер по stdio или установить его в поддерживаемые клиенты.
+    /// Запустить MCP сервер по stdio или HTTP.
     Mcp {
         #[arg(
             long,
@@ -287,31 +256,6 @@ pub enum Command {
             help = "Канонический публичный URL MCP сервера для HTTP auth discovery"
         )]
         public_url: Option<String>,
-        #[command(subcommand)]
-        action: Option<McpCommand>,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum McpCommand {
-    /// Установить yacli MCP сервер в локально доступные клиенты.
-    Install {
-        #[arg(long = "client", value_enum, value_name = "КЛИЕНТ")]
-        client: Vec<McpClientArg>,
-        #[arg(
-            long,
-            value_enum,
-            default_value_t = McpTransportArg::Stdio,
-            value_name = "ТРАНСПОРТ",
-            help = "Какой транспорт регистрировать в клиенте"
-        )]
-        transport: McpTransportArg,
-        #[arg(
-            long,
-            value_name = "URL",
-            help = "URL MCP HTTP сервера, если выбран HTTP транспорт"
-        )]
-        url: Option<String>,
     },
 }
 

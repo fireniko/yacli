@@ -59,6 +59,7 @@ pub struct StoredAppPasswordCredential {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SecretBackendKind {
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
     File,
     Keyring,
 }
@@ -213,16 +214,29 @@ impl CredentialStore {
 }
 
 fn configured_secret_backend() -> Result<SecretBackendKind> {
-    match env::var(SECRET_BACKEND_ENV)
-        .ok()
+    let requested = env::var(SECRET_BACKEND_ENV).ok();
+    parse_secret_backend(requested.as_deref(), file_backend_allowed())
+}
+
+/// The plaintext `file` backend exists only in debug/test builds.
+const fn file_backend_allowed() -> bool {
+    cfg!(debug_assertions)
+}
+
+fn parse_secret_backend(requested: Option<&str>, allow_file: bool) -> Result<SecretBackendKind> {
+    match requested
         .map(|value| value.trim().to_ascii_lowercase())
         .as_deref()
     {
-        Some("file") => Ok(SecretBackendKind::File),
+        Some("file") if allow_file => Ok(SecretBackendKind::File),
+        Some("file") => Err(YacliError::Config(
+            "the plaintext `file` secret backend is disabled in release builds; tokens are stored only in the system keyring (unset YACLI_SECRET_BACKEND)"
+                .to_string(),
+        )),
         Some("keyring") => supported_keyring_backend(),
         None | Some("") => default_secret_backend(),
         Some(other) => Err(YacliError::Config(format!(
-            "unsupported secret backend `{other}`; expected `keyring` or `file`"
+            "unsupported secret backend `{other}`; expected `keyring`"
         ))),
     }
 }
@@ -248,7 +262,7 @@ fn supported_keyring_backend() -> Result<SecretBackendKind> {
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         Err(YacliError::UnsupportedOperation(
-            "system keyring backend is not supported on this target; set YACLI_SECRET_BACKEND=file if you need legacy plaintext storage"
+            "system keyring backend is not supported on this target"
                 .to_string(),
         ))
     }
@@ -352,6 +366,68 @@ fn keyring_delete(_account_name: &str, _service: &str) -> Result<()> {
     ))
 }
 
+/// True when the configured secret backend is the system keyring (always the
+/// case in release builds).
+pub(crate) fn secrets_use_keyring() -> Result<bool> {
+    Ok(configured_secret_backend()? == SecretBackendKind::Keyring)
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn keyring_secret_entry(label: &str) -> Result<keyring::Entry> {
+    keyring::Entry::new(KEYRING_SERVICE_NAME, &format!("oauth-pkce-verifier:{label}"))
+        .map_err(|err| YacliError::Auth(format!("failed to create keyring entry: {err}")))
+}
+
+/// Store a short-lived secret (PKCE code verifier) in the system keyring.
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+pub(crate) fn keyring_secret_set(label: &str, value: &str) -> Result<()> {
+    keyring_secret_entry(label)?
+        .set_password(value)
+        .map_err(|err| YacliError::Auth(format!("failed to store secret in system keyring: {err}")))
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+pub(crate) fn keyring_secret_get(label: &str) -> Result<Option<String>> {
+    match keyring_secret_entry(label)?.get_password() {
+        Ok(value) => Ok(Some(value)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(err) => Err(YacliError::Auth(format!(
+            "failed to read secret from system keyring: {err}"
+        ))),
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+pub(crate) fn keyring_secret_delete(label: &str) -> Result<()> {
+    match keyring_secret_entry(label)?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(err) => Err(YacliError::Auth(format!(
+            "failed to delete secret from system keyring: {err}"
+        ))),
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+pub(crate) fn keyring_secret_set(_label: &str, _value: &str) -> Result<()> {
+    Err(YacliError::UnsupportedOperation(
+        "system keyring backend is not supported on this target".to_string(),
+    ))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+pub(crate) fn keyring_secret_get(_label: &str) -> Result<Option<String>> {
+    Err(YacliError::UnsupportedOperation(
+        "system keyring backend is not supported on this target".to_string(),
+    ))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+pub(crate) fn keyring_secret_delete(_label: &str) -> Result<()> {
+    Err(YacliError::UnsupportedOperation(
+        "system keyring backend is not supported on this target".to_string(),
+    ))
+}
+
 const fn default_version() -> u32 {
     1
 }
@@ -363,6 +439,36 @@ mod tests {
     use super::*;
 
     use tempfile::tempdir;
+
+    #[test]
+    fn file_backend_is_rejected_when_not_allowed() {
+        let err = parse_secret_backend(Some("file"), false).expect_err("file must be rejected");
+        let text = err.to_string();
+        assert!(text.contains("disabled in release builds"), "{text}");
+        let err = parse_secret_backend(Some(" FILE "), false).expect_err("case-insensitive");
+        assert!(err.to_string().contains("disabled in release builds"));
+    }
+
+    #[test]
+    fn file_backend_is_accepted_only_when_allowed() {
+        assert_eq!(
+            parse_secret_backend(Some("file"), true).expect("allowed"),
+            SecretBackendKind::File
+        );
+    }
+
+    #[test]
+    fn unknown_backend_is_rejected() {
+        assert!(parse_secret_backend(Some("plaintext"), true).is_err());
+        assert!(parse_secret_backend(Some("plaintext"), false).is_err());
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn release_build_does_not_allow_file_backend() {
+        assert!(!file_backend_allowed());
+        assert!(parse_secret_backend(Some("file"), file_backend_allowed()).is_err());
+    }
 
     static CREDENTIAL_STORE_TEST_LOCK: Mutex<()> = Mutex::new(());
 

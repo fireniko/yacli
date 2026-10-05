@@ -1457,7 +1457,7 @@ fn execute_auth(format: OutputFormat, action: AuthCommand) -> Result<RenderedOut
                     };
                     let login = exchange_authorization_code(session, &code)?;
                     if pending_session_persisted {
-                        session_store.remove_matching(&account_name, &services, &client_id);
+                        session_store.remove_matching(&account_name, &services, &client_id)?;
                         session_store.save()?;
                     }
 

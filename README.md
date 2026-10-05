@@ -137,7 +137,7 @@ export YACLI_CALENDAR_APP_PASSWORD='<пароль>'
 yacli login calendar --env-var YACLI_CALENDAR_APP_PASSWORD
 ```
 
-В релизных сборках OAuth-токены и пароли приложений хранятся в системном keyring/keychain. В debug/test-сборках по умолчанию используется `file` backend, чтобы локальная разработка и `cargo test` не спамили keychain prompt-ами. Для явного override: `export YACLI_SECRET_BACKEND=keyring` или `export YACLI_SECRET_BACKEND=file`.
+В релизных сборках OAuth-токены и пароли приложений хранятся только в системном keyring/keychain; plaintext `file` backend в релизной сборке недоступен (`YACLI_SECRET_BACKEND=file` даёт ошибку). Только в debug/test-сборках по умолчанию используется `file` backend, чтобы `cargo test` не спамил keychain prompt-ами (не используйте debug-сборку с реальными аккаунтами).
 
 </details>
 

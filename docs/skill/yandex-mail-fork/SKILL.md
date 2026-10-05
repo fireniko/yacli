@@ -83,7 +83,9 @@ args = ["mcp"]
     "ask": [
       "mcp__yandex-mail__yacli_mail_send", "mcp__yandex-mail__yacli_mail_send_link",
       "mcp__yandex-mail__yacli_mail_send_published_link", "mcp__yandex-mail__yacli_mail_reply",
-      "mcp__yandex-mail__yacli_mail_forward", "mcp__yandex-mail__yacli_mail_attachment_export",
+      "mcp__yandex-mail__yacli_mail_forward", "mcp__yandex-mail__yacli_mail_mark",
+      "mcp__yandex-mail__yacli_mail_move", "mcp__yandex-mail__yacli_mail_trash",
+      "mcp__yandex-mail__yacli_mail_attachment_export",
       "mcp__yandex-mail__yacli_mail_invite_create_event", "mcp__yandex-mail__yacli_calendar_create",
       "mcp__yandex-mail__yacli_calendar_delete", "mcp__yandex-mail__yacli_disk_mkdir",
       "mcp__yandex-mail__yacli_disk_upload", "mcp__yandex-mail__yacli_disk_upload_link",
@@ -98,7 +100,7 @@ args = ["mcp"]
 
 Проверка защиты: вызови отправку письма самому себе. Перед выполнением должно появиться окно подтверждения. Безопасно проверить правило можно через `dry_run=true`: письмо не уйдёт, а запрос разрешения всё равно появится.
 
-В yacli нет инструмента удаления писем.
+Управление письмами: `mail_mark` (прочитано/флажок), `mail_move` (в другую существующую папку, по имени как в `mail_folders`), `mail_trash` (в корзину по атрибуту `\Trash`). Безвозвратного удаления в yacli нет совсем: письмо из корзины можно вернуть, а очистить корзину нужно в веб-интерфейсе Яндекса. Перемещение без поддержки `MOVE` и `UIDPLUS` на сервере отклоняется (обычный `EXPUNGE` не используется). У всех трёх есть `dry_run`.
 
 **Важно для чужих установок:** сервер сам не ограничивает набор инструментов; вся защита от случайной или вызванной письмом отправки держится на правилах `ask` выше. Если форком пользуются несколько людей или он работает без человека, одних правил клиента недостаточно: нужен список разрешённых инструментов на стороне сервера (в этом форке его нет).
 

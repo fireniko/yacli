@@ -125,6 +125,26 @@ impl AccountStore {
             .collect()
     }
 
+    /// Switch the mail auth mode. A mode change drops the old credential_ref,
+    /// because an OAuth token reference is meaningless for an app password and vice versa.
+    pub fn set_mail_auth_mode(
+        &mut self,
+        account_name: &str,
+        mode: crate::model::MailAuthMode,
+    ) -> Result<bool> {
+        let account = self
+            .file
+            .accounts
+            .get_mut(account_name)
+            .ok_or_else(|| YacliError::AccountNotFound(account_name.to_string()))?;
+        if account.mail.auth_mode == mode {
+            return Ok(false);
+        }
+        account.mail.auth_mode = mode;
+        account.mail.credential_ref = None;
+        Ok(true)
+    }
+
     pub fn set_service_credential_ref(
         &mut self,
         account_name: &str,

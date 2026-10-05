@@ -1146,6 +1146,32 @@ fn execute_account(format: OutputFormat, action: AccountCommand) -> Result<Rende
                 ]),
             )
         }
+        AccountCommand::SetMailAuth { mode, account } => {
+            let mut store = AccountStore::load()?;
+            let name = store.resolved_account_name(account.as_deref())?;
+            let mode: MailAuthMode = mode.into();
+            let changed = store.set_mail_auth_mode(&name, mode)?;
+            store.save()?;
+            let mode_label = match mode {
+                MailAuthMode::OauthXoauth2 => "oauth_xoauth2",
+                MailAuthMode::AppPassword => "app_password",
+            };
+            ok_output(
+                format,
+                "account.set_mail_auth",
+                json!({
+                    "account": name,
+                    "mail_auth_mode": mode_label,
+                    "changed": changed,
+                }),
+                render_key_value_table(&[
+                    ("operation", "account.set_mail_auth".to_string()),
+                    ("account", name),
+                    ("mail_auth_mode", mode_label.to_string()),
+                    ("changed", changed.to_string()),
+                ]),
+            )
+        }
         AccountCommand::List => {
             let store = AccountStore::load()?;
             let items: Vec<_> = store
@@ -1336,18 +1362,35 @@ fn execute_auth(format: OutputFormat, action: AuthCommand) -> Result<RenderedOut
                 } else {
                     service
                 };
+            let app_password_service: Option<&'static str> = match requested_service {
+                Some(AuthServiceArg::Calendar) => Some("calendar"),
+                Some(AuthServiceArg::Mail)
+                    if matches!(
+                        account_store.get_account(&account_name)?.mail.auth_mode,
+                        MailAuthMode::AppPassword
+                    ) =>
+                {
+                    Some("mail")
+                }
+                _ => None,
+            };
             match requested_service {
-                Some(AuthServiceArg::Calendar) => {
-                    let account = account_store.get_account(&account_name)?;
-                    ensure_calendar_supports_app_password(account)?;
+                Some(AuthServiceArg::Calendar | AuthServiceArg::Mail)
+                    if app_password_service.is_some() =>
+                {
+                    let service_name = app_password_service.unwrap_or("calendar");
+                    if service_name == "calendar" {
+                        let account = account_store.get_account(&account_name)?;
+                        ensure_calendar_supports_app_password(account)?;
+                    }
                     if client_id.is_some() || code.is_some() || login_hint.is_some() {
                         return Err(YacliError::Validation(
-                            "calendar login uses app password auth; rerun with `yacli login calendar --app-password <app-password>` or `yacli login calendar --env-var NAME`".to_string(),
+                            format!("{service_name} login uses app password auth; rerun with `yacli login {service_name} --env-var NAME` (recommended) or `--app-password <app-password>`"),
                         ));
                     }
                     if env_var.is_some() && app_password.is_some() {
                         return Err(YacliError::Validation(
-                            "calendar login accepts either `--app-password` or `--env-var`, but not both".to_string(),
+                            format!("{service_name} login accepts either `--app-password` or `--env-var`, but not both"),
                         ));
                     }
 
@@ -1356,27 +1399,29 @@ fn execute_auth(format: OutputFormat, action: AuthCommand) -> Result<RenderedOut
                             let mut credential_store = CredentialStore::load()?;
                             credential_store.set_app_password(
                                 account_name.clone(),
-                                "calendar".to_string(),
+                                service_name.to_string(),
                                 StoredAppPasswordCredential {
                                     kind: "app_password".to_string(),
                                     secret: app_password,
                                 },
                             );
                             credential_store.save()?;
-                            ("store:calendar".to_string(), "app_password_store")
+                            (format!("store:{service_name}"), "app_password_store")
                         }
                         (None, Some(env_var)) => (format!("env:{env_var}"), "app_password_env"),
                         (None, None) => {
-                            return Err(YacliError::Validation(
-                                "calendar login requires `--app-password <app-password>` or `--env-var NAME`".to_string(),
-                            ));
+                            return Err(YacliError::Validation(if service_name == "mail" {
+                                "mail login with app password needs the password from a non-echoing source; pass `--env-var NAME` (the variable holds the app password; recommended) or `--app-password <app-password>` (ends up in shell history)".to_string()
+                            } else {
+                                "calendar login requires `--app-password <app-password>` or `--env-var NAME`".to_string()
+                            }));
                         }
                         (Some(_), Some(_)) => unreachable!(),
                     };
 
                     account_store.set_service_credential_ref(
                         &account_name,
-                        "calendar",
+                        service_name,
                         Some(credential_ref.clone()),
                     )?;
                     account_store.save()?;
@@ -1386,26 +1431,29 @@ fn execute_auth(format: OutputFormat, action: AuthCommand) -> Result<RenderedOut
                         "auth.login",
                         json!({
                             "account": account_name,
-                            "service": "calendar",
+                            "service": service_name,
                             "credential_ref": credential_ref,
                             "mode": mode,
                         }),
                         render_key_value_table(&[
                             ("operation", "auth.login".to_string()),
                             ("account", account_name),
-                            ("service", "calendar".to_string()),
+                            ("service", service_name.to_string()),
                             ("credential_ref", credential_ref),
                             ("mode", mode.to_string()),
                         ]),
                     )
                 }
-                Some(AuthServiceArg::Mail) | Some(AuthServiceArg::Disk) | None => {
+                Some(AuthServiceArg::Calendar)
+                | Some(AuthServiceArg::Mail)
+                | Some(AuthServiceArg::Disk)
+                | None => {
                     let account = account_store.get_account(&account_name)?;
                     let services = oauth_login_services(account, requested_service)?;
                     if env_var.is_some() || app_password.is_some() {
                         let command_hint = match requested_service {
                             Some(AuthServiceArg::Mail) => {
-                                "mail login uses built-in OAuth by default; run `yacli login mail`"
+                                "this account uses mail OAuth (auth_mode=oauth_xoauth2); run `yacli login mail`. To use an app password instead, switch the account first: `yacli account set-mail-auth app-password` (or create it with `yacli account add NAME EMAIL --mail-auth-mode app-password`), then `yacli auth login --service mail --env-var NAME`"
                             }
                             Some(AuthServiceArg::Disk) => {
                                 "disk login uses built-in OAuth by default; run `yacli login disk`"

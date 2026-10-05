@@ -323,6 +323,8 @@ pub fn download_public_resource_with_progress(
         )
     })?;
 
+    let download_url =
+        crate::net_policy::parse_transfer_url("public download URL", &download_url)?.to_string();
     let download_timeout = configured_download_timeout()?;
     let download_client = build_transfer_http_client(download_timeout)?;
     let transfer = retry_transfer(|_| {
@@ -673,12 +675,13 @@ fn upload_private_resource_attempt(
         )));
     }
 
+    let upload_url = crate::net_policy::parse_transfer_url("disk upload URL", &ticket.href)?;
     let upload_timeout = configured_upload_timeout()?;
     let upload_client = build_transfer_http_client(upload_timeout)?;
     let upload_body = ProgressReader::new(fs::File::open(&request.source)?, progress)
         .with_total(Some(source_meta.bytes_written));
     let upload_response = upload_client
-        .put(&ticket.href)
+        .put(upload_url)
         .header("Content-Type", "application/octet-stream")
         .body(reqwest::blocking::Body::new(upload_body))
         .send()
@@ -810,13 +813,14 @@ pub fn download_private_resource_with_progress(
         )));
     }
 
+    let download_url = crate::net_policy::parse_transfer_url("disk download URL", &ticket.href)?;
     let download_timeout = configured_download_timeout()?;
     let download_client = build_transfer_http_client(download_timeout)?;
     let progress = progress.map(|callback| Arc::new(Mutex::new(callback)));
     let artifact = retry_transfer(|_| {
         download_to_path(
             &download_client,
-            &ticket.href,
+            download_url.as_str(),
             &request.output,
             request.force,
             resource.size,
@@ -1013,14 +1017,20 @@ fn build_http_client() -> Result<Client> {
         .user_agent(format!("yacli/{}", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(DEFAULT_HTTP_TIMEOUT_SECS))
         .timeout(Duration::from_secs(DEFAULT_HTTP_TIMEOUT_SECS))
+        .redirect(transfer_redirect_policy())
         .build()
         .map_err(Into::into)
+}
+
+fn transfer_redirect_policy() -> reqwest::redirect::Policy {
+    crate::net_policy::redirect_policy(crate::net_policy::RedirectScope::YandexTransfer)
 }
 
 fn build_transfer_http_client(timeout: Option<Duration>) -> Result<Client> {
     let mut builder = Client::builder()
         .user_agent(format!("yacli/{}", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(Duration::from_secs(DEFAULT_HTTP_TIMEOUT_SECS));
+        .connect_timeout(Duration::from_secs(DEFAULT_HTTP_TIMEOUT_SECS))
+        .redirect(transfer_redirect_policy());
     if let Some(timeout) = timeout {
         builder = builder.timeout(timeout);
     }

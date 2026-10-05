@@ -321,6 +321,9 @@ impl CaldavClient {
         let http = Client::builder()
             .user_agent(format!("yacli/{}", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(CALDAV_TIMEOUT_SECS))
+            .redirect(crate::net_policy::redirect_policy(
+                crate::net_policy::RedirectScope::Hosts(crate::net_policy::CALDAV_HOSTS),
+            ))
             .build()?;
 
         Ok(Self {

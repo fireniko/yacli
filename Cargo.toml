@@ -29,7 +29,7 @@ url = "2.5"
 native-tls = "0.2"
 mailparse = "0.16"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-quick-xml = "0.37"
+quick-xml = "0.41"
 mime_guess = "2.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]

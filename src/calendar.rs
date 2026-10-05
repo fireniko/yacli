@@ -755,16 +755,19 @@ struct DavResponse {
 
 fn parse_dav_responses(xml: &str) -> Result<Vec<DavResponse>> {
     let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
 
     let mut buf = Vec::new();
     let mut stack: Vec<String> = Vec::new();
     let mut responses = Vec::new();
     let mut current: Option<DavResponse> = None;
+    // quick-xml 0.38+ reports entity references as separate events, so text
+    // is accumulated until the next tag boundary.
+    let mut text = DavText::default();
 
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(event)) => {
+                text.flush(&stack, current.as_mut());
                 let name = local_name(event.name().as_ref()).to_string();
                 if name == "response" {
                     current = Some(DavResponse::default());
@@ -777,6 +780,7 @@ fn parse_dav_responses(xml: &str) -> Result<Vec<DavResponse>> {
                 stack.push(name);
             }
             Ok(Event::Empty(event)) => {
+                text.flush(&stack, current.as_mut());
                 let name = local_name(event.name().as_ref()).to_string();
                 if let Some(response) = current.as_mut()
                     && path_ends_with(&stack, &["response", "propstat", "prop", "resourcetype"])
@@ -785,21 +789,44 @@ fn parse_dav_responses(xml: &str) -> Result<Vec<DavResponse>> {
                 }
             }
             Ok(Event::Text(event)) => {
-                let text = event
-                    .unescape()
-                    .map_err(|err| {
-                        YacliError::Serialization(format!(
-                            "failed to decode CalDAV XML text: {err}"
-                        ))
-                    })?
-                    .into_owned();
-                apply_dav_text(&stack, current.as_mut(), text);
+                let decoded = event.decode().map_err(|err| {
+                    YacliError::Serialization(format!("failed to decode CalDAV XML text: {err}"))
+                })?;
+                text.value.push_str(&decoded);
+            }
+            Ok(Event::GeneralRef(event)) => {
+                let resolved = match event.resolve_char_ref().map_err(|err| {
+                    YacliError::Serialization(format!("invalid CalDAV XML character reference: {err}"))
+                })? {
+                    Some(ch) => ch,
+                    None => {
+                        let name = event.decode().map_err(|err| {
+                            YacliError::Serialization(format!(
+                                "failed to decode CalDAV XML entity: {err}"
+                            ))
+                        })?;
+                        match name.as_ref() {
+                            "lt" => '<',
+                            "gt" => '>',
+                            "amp" => '&',
+                            "apos" => '\'',
+                            "quot" => '"',
+                            other => {
+                                return Err(YacliError::Serialization(format!(
+                                    "unknown CalDAV XML entity `&{other};`"
+                                )));
+                            }
+                        }
+                    }
+                };
+                text.value.push(resolved);
             }
             Ok(Event::CData(event)) => {
-                let text = String::from_utf8_lossy(event.as_ref()).into_owned();
-                apply_dav_text(&stack, current.as_mut(), text);
+                text.value.push_str(&String::from_utf8_lossy(event.as_ref()));
+                text.has_cdata = true;
             }
             Ok(Event::End(event)) => {
+                text.flush(&stack, current.as_mut());
                 let name = local_name(event.name().as_ref()).to_string();
                 if name == "response"
                     && let Some(response) = current.take()
@@ -820,6 +847,25 @@ fn parse_dav_responses(xml: &str) -> Result<Vec<DavResponse>> {
     }
 
     Ok(responses)
+}
+
+#[derive(Default)]
+struct DavText {
+    value: String,
+    has_cdata: bool,
+}
+
+impl DavText {
+    fn flush(&mut self, stack: &[String], current: Option<&mut DavResponse>) {
+        let value = std::mem::take(&mut self.value);
+        let has_cdata = std::mem::take(&mut self.has_cdata);
+        let value = if has_cdata {
+            value
+        } else {
+            value.trim().to_string()
+        };
+        apply_dav_text(stack, current, value);
+    }
 }
 
 fn apply_dav_text(stack: &[String], current: Option<&mut DavResponse>, text: String) {
@@ -1549,5 +1595,16 @@ END:VCALENDAR]]></c:calendar-data>
         let query = build_calendar_uid_query_xml("evt<&>\"'");
         assert!(query.contains("evt&lt;&amp;&gt;&quot;&apos;"));
         assert!(query.contains("prop-filter name=\"UID\""));
+    }
+
+    #[test]
+    fn parse_dav_responses_decodes_entities_in_text() {
+        let xml = r#"<d:multistatus xmlns:d="DAV:"><d:response><d:propstat><d:prop><d:displayname>Work &amp; Home &#1055; &lt;x&gt;</d:displayname></d:prop></d:propstat></d:response></d:multistatus>"#;
+        let responses = parse_dav_responses(xml).expect("parse");
+        assert_eq!(responses.len(), 1);
+        assert_eq!(
+            responses[0].displayname.as_deref(),
+            Some("Work & Home \u{41f} <x>")
+        );
     }
 }

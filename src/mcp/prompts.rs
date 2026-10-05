@@ -620,7 +620,6 @@ fn complete_resource_reference(
             "yacli.account.list".to_string(),
             "yacli.account.current".to_string(),
             "yacli.auth.status".to_string(),
-            "yacli.update.check".to_string(),
         ],
         "prompt" if uri.starts_with("ui://yacli/dashboard") => {
             prompt_names().into_iter().map(str::to_string).collect()

@@ -87,55 +87,6 @@ jobs:
           Compress-Archive -Path (Join-Path $stageDir '*') -DestinationPath $assetPath -Force
           $hash = (Get-FileHash -Path $assetPath -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  ${{ matrix.asset }}" | Out-File -FilePath (Join-Path (Resolve-Path dist) "SHA256SUMS") -Encoding ascii
-      - name: Start local asset server (Unix)
-        if: matrix.package_kind == 'unix'
-        shell: bash
-        run: |
-          python3 -m http.server 8877 --bind 127.0.0.1 --directory dist >/tmp/yacli-install-smoke.log 2>&1 &
-          echo $! > server.pid
-          sleep 2
-      - name: Smoke Unix installer
-        if: matrix.package_kind == 'unix'
-        shell: bash
-        run: |
-          install_dir="$RUNNER_TEMP/bin"
-          sh ./scripts/install.sh --base-url http://127.0.0.1:8877 --install-dir "$install_dir"
-          "$install_dir/yacli" --format json guide --topic disk
-      - name: Smoke Windows installer
-        if: matrix.package_kind == 'windows'
-        shell: pwsh
-        run: |
-          $installDir = Join-Path $env:RUNNER_TEMP "bin"
-          $stdoutLog = Join-Path $env:RUNNER_TEMP "yacli-install-smoke.stdout.log"
-          $stderrLog = Join-Path $env:RUNNER_TEMP "yacli-install-smoke.stderr.log"
-          $process = Start-Process python -WorkingDirectory (Resolve-Path .) -ArgumentList '-m','http.server','8877','--bind','127.0.0.1','--directory','dist' -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog -PassThru
-          try {
-            $ready = $false
-            for ($attempt = 0; $attempt -lt 20; $attempt++) {
-              try {
-                Invoke-WebRequest -Uri "http://127.0.0.1:8877/SHA256SUMS" -UseBasicParsing | Out-Null
-                $ready = $true
-                break
-              }
-              catch {
-                Start-Sleep -Seconds 1
-              }
-            }
-            if (-not $ready) {
-              if (Test-Path $stdoutLog) {
-                Get-Content $stdoutLog
-              }
-              if (Test-Path $stderrLog) {
-                Get-Content $stderrLog
-              }
-              throw "Local asset server did not become ready on Windows."
-            }
-            ./scripts/install.ps1 -BaseUrl http://127.0.0.1:8877 -InstallDir $installDir
-            & (Join-Path $installDir "yacli.exe") --format json guide --topic disk
-          }
-          finally {
-            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-          }
 
   homebrew-smoke:
     runs-on: macos-latest

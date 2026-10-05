@@ -16,7 +16,7 @@ class Yacli < Formula
   end
 
   on_linux do
-    odie "yacli Homebrew packages are not published for Linux yet. Use install.sh or cargo install."
+    odie "yacli Homebrew packages are not published for Linux yet. Build from source with cargo build --release."
   end
 
   def install

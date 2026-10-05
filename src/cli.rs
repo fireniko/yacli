@@ -290,24 +290,6 @@ pub enum Command {
         #[command(subcommand)]
         action: Option<McpCommand>,
     },
-    /// Обновить yacli из GitHub Releases.
-    Update {
-        #[arg(
-            long,
-            default_value = "latest",
-            value_name = "ВЕРСИЯ",
-            help = "Версия без префикса v или latest"
-        )]
-        version: String,
-        #[arg(
-            long,
-            default_value_t = false,
-            help = "Только проверить, доступно ли обновление"
-        )]
-        check: bool,
-        #[arg(long, hide = true, value_name = "URL")]
-        base_url: Option<String>,
-    },
 }
 
 #[derive(Debug, Subcommand)]

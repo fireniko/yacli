@@ -75,7 +75,6 @@ use crate::runtime_context::{
     resolve_disk_private_context, resolve_mail_private_context,
 };
 use crate::suggestions::suggestions_payload;
-use crate::update::execute_update;
 use crate::workflows;
 
 pub fn execute(cli: Cli) -> Result<RenderedOutput> {
@@ -161,11 +160,6 @@ pub fn execute(cli: Cli) -> Result<RenderedOutput> {
         Command::Mcp { action: None, .. } => Err(YacliError::UnsupportedOperation(
             "mcp server mode is handled in main".to_string(),
         )),
-        Command::Update {
-            version,
-            check,
-            base_url,
-        } => execute_update(cli.format, &version, check, base_url.as_deref()),
     }
 }
 
@@ -3490,13 +3484,6 @@ fn all_guide_commands() -> Vec<GuideCommandEntry> {
             summary: "Показать текущий активный аккаунт.",
             requires_account: false,
             examples: vec!["yacli whoami"],
-        },
-        GuideCommandEntry {
-            path: "update",
-            topic: "account",
-            summary: "Проверить наличие нового release или обновить установленный yacli по месту.",
-            requires_account: false,
-            examples: vec!["yacli update --check", "yacli update"],
         },
         GuideCommandEntry {
             path: "status",

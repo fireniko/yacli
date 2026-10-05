@@ -353,14 +353,6 @@ fn mcp_http_initialize_returns_session_header_and_supports_follow_up_requests() 
         account_tool["_meta"]["ui"]["resourceUri"],
         "ui://yacli/dashboard"
     );
-    let update_tool = tools
-        .iter()
-        .find(|tool| tool["name"] == "yacli.update.check")
-        .expect("update tool");
-    assert_eq!(
-        update_tool["_meta"]["ui"]["resourceUri"],
-        "ui://yacli/dashboard"
-    );
 
     let prompts_list = post_json(
         &client,

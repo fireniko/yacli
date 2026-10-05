@@ -46,7 +46,6 @@ use crate::runtime_context::{
     resolve_mail_private_context,
 };
 use crate::suggestions::suggestions_payload;
-use crate::update::check_for_update;
 use crate::workflows;
 use crate::{
     calendar::{
@@ -114,7 +113,6 @@ const DASHBOARD_TOOL_APP_SNAPSHOT: &str = "yacli.app.snapshot";
 const DASHBOARD_TOOL_ACCOUNT_LIST: &str = "yacli.account.list";
 const DASHBOARD_TOOL_ACCOUNT_CURRENT: &str = "yacli.account.current";
 const DASHBOARD_TOOL_AUTH_STATUS: &str = "yacli.auth.status";
-const DASHBOARD_TOOL_UPDATE_CHECK: &str = "yacli.update.check";
 const DASHBOARD_TOOL_GOAL_ROUTE: &str = "yacli.goal.route";
 const DASHBOARD_TOOL_DOCTOR_APPLY_SAFE: &str = "yacli.doctor.apply_safe";
 
@@ -1162,19 +1160,6 @@ fn tool_definitions(ui_enabled: bool, roots_enabled: bool) -> Vec<Value> {
             ui_enabled,
         ),
         tool(
-            DASHBOARD_TOOL_UPDATE_CHECK,
-            "Check whether a newer published yacli release is available for this target.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "version": { "type": "string" }
-                },
-                "additionalProperties": false
-            }),
-            Some(MODEL_AND_APP_VISIBILITY),
-            ui_enabled,
-        ),
-        tool(
             DASHBOARD_TOOL_GOAL_ROUTE,
             "Route a natural-language goal into the best yacli workflow, prompt and MCP tool-path.",
             json!({
@@ -1703,9 +1688,6 @@ fn call_tool(params: Value, ui_enabled: bool) -> Result<Value> {
         "yacli.account.list" => account_list()?,
         "yacli.account.current" => account_current()?,
         "yacli.auth.status" => auth_status(arguments.get("account").and_then(Value::as_str))?,
-        DASHBOARD_TOOL_UPDATE_CHECK => {
-            update_check(arguments.get("version").and_then(Value::as_str))?
-        }
         DASHBOARD_TOOL_GOAL_ROUTE => goal_route_payload(
             required_string(&arguments, "goal")?,
             arguments.get("account").and_then(Value::as_str),
@@ -2227,20 +2209,6 @@ fn auth_status(account: Option<&str>) -> Result<Value> {
             ("calendar", auth_state(&credential_store, &name, account.calendar.credential_ref.as_deref(), "calendar")),
             ("disk", auth_state(&credential_store, &name, account.disk.credential_ref.as_deref(), "disk")),
         ])
-    }))
-}
-
-fn update_check(version: Option<&str>) -> Result<Value> {
-    let report = check_for_update(version)?;
-    Ok(json!({
-        "operation": report.operation,
-        "status": report.status,
-        "currentVersion": report.current_version,
-        "targetVersion": report.target_version,
-        "requestedVersion": report.requested_version,
-        "asset": report.asset,
-        "target": report.target,
-        "baseUrl": report.base_url,
     }))
 }
 
@@ -3923,8 +3891,7 @@ fn tool_visibility(tool_name: &str) -> Option<&'static [&'static str]> {
         | "yacli.account.current"
         | "yacli.auth.status"
         | DASHBOARD_TOOL_GOAL_ROUTE
-        | DASHBOARD_TOOL_DOCTOR_APPLY_SAFE
-        | DASHBOARD_TOOL_UPDATE_CHECK => Some(MODEL_AND_APP_VISIBILITY),
+        | DASHBOARD_TOOL_DOCTOR_APPLY_SAFE => Some(MODEL_AND_APP_VISIBILITY),
         _ => None,
     }
 }

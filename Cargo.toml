@@ -30,10 +30,6 @@ native-tls = "0.2"
 mailparse = "0.16"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 quick-xml = "0.37"
-flate2 = "1.1"
-self-replace = "1.5.0"
-tar = "0.4"
-zip = { version = "2.4", default-features = false, features = ["deflate"] }
 mime_guess = "2.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]

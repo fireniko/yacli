@@ -25,5 +25,4 @@ pub mod paths;
 mod persist;
 pub mod runtime_context;
 pub mod suggestions;
-pub mod update;
 pub mod workflows;

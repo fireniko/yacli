@@ -53,8 +53,6 @@ current_target() {
 printf '==> yacli version/help surface\n'
 "$BINARY" --version >/dev/null
 "$BINARY" mcp --help >/dev/null
-"$BINARY" mcp install --help >/dev/null
-"$BINARY" update --help >/dev/null
 "$BINARY" --format json guide --topic mail >/dev/null
 
 printf '==> doctor secret backend contract\n'
@@ -200,33 +198,6 @@ with urllib.request.urlopen(tools_list) as response:
 tools = payload["result"]["tools"]
 assert any(tool["name"] == "yacli.app.snapshot" for tool in tools), payload
 assert any(tool["name"] == "yacli.mail.send" for tool in tools), payload
-PY
-
-printf '==> update check against local release mirror\n'
-target="$(current_target)"
-mirror_root="${tmp_root}/mirror"
-version="v9.9.9"
-asset_name="yacli-${target}.tar.gz"
-mkdir -p "${mirror_root}/releases/download/${version}"
-printf 'deadbeef  %s\n' "$asset_name" > "${mirror_root}/releases/download/${version}/SHA256SUMS"
-mirror_port="$(pick_port)"
-python3 -m http.server "$mirror_port" --bind 127.0.0.1 --directory "$mirror_root" >/dev/null 2>&1 &
-mirror_pid="$!"
-sleep 1
-update_output="$("$BINARY" update --check --base-url "http://127.0.0.1:${mirror_port}/releases/download/${version}")"
-kill "$mirror_pid" >/dev/null 2>&1 || true
-wait "$mirror_pid" 2>/dev/null || true
-mirror_pid=""
-python3 - <<'PY' "$update_output"
-import json
-import sys
-
-payload = json.loads(sys.argv[1])
-assert payload["operation"] == "update.check", payload
-assert payload["status"] == "update_available", payload
-assert payload["target_version"] == "9.9.9", payload
-assert payload["requested_version"] == "latest", payload
-assert "/releases/download/v9.9.9" in payload["base_url"], payload
 PY
 
 printf 'Smoke product surface passed for %s\n' "$BINARY"

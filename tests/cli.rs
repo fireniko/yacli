@@ -12,22 +12,6 @@ fn yacli() -> Command {
     command
 }
 
-fn current_release_update_target() -> (&'static str, &'static str) {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64") => ("yacli-aarch64-apple-darwin.tar.gz", "aarch64-apple-darwin"),
-        ("macos", "x86_64") => ("yacli-x86_64-apple-darwin.tar.gz", "x86_64-apple-darwin"),
-        ("linux", "aarch64") => (
-            "yacli-aarch64-unknown-linux-gnu.tar.gz",
-            "aarch64-unknown-linux-gnu",
-        ),
-        ("linux", "x86_64") => (
-            "yacli-x86_64-unknown-linux-gnu.tar.gz",
-            "x86_64-unknown-linux-gnu",
-        ),
-        ("windows", "x86_64") => ("yacli-x86_64-pc-windows-msvc.zip", "x86_64-pc-windows-msvc"),
-        (os, arch) => panic!("unsupported published auto-update target {arch}-{os}"),
-    }
-}
 
 fn write_accounts_file(config_dir: &std::path::Path, content: &str) {
     fs::write(config_dir.join("accounts.toml"), content).expect("accounts file written");
@@ -268,7 +252,6 @@ fn top_level_help_hides_agent_guide_command() {
         .stdout(predicate::str::contains("goal"))
         .stdout(predicate::str::contains("workflow"))
         .stdout(predicate::str::contains("login"))
-        .stdout(predicate::str::contains("update"))
         .stdout(predicate::str::contains("mail"))
         .stdout(predicate::str::contains("calendar"))
         .stdout(predicate::str::contains("disk"))
@@ -1164,49 +1147,6 @@ fn setup_is_idempotent_for_existing_account() {
     assert_eq!(value["account"]["reused"], true);
 }
 
-#[test]
-fn update_help_describes_release_update_surface() {
-    yacli()
-        .args(["update", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "Обновить yacli из GitHub Releases",
-        ))
-        .stdout(predicate::str::contains("--version"))
-        .stdout(predicate::str::contains("--check"));
-}
-
-#[test]
-fn update_check_uses_release_checksum_mirror_and_reports_available_target() {
-    let (asset, target) = current_release_update_target();
-    let mut server = Server::new();
-    let base_url = format!("{}/releases/download/v9.9.9", server.url());
-
-    let _checksums = server
-        .mock("GET", "/releases/download/v9.9.9/SHA256SUMS")
-        .with_status(200)
-        .with_header("content-type", "text/plain")
-        .with_body(format!("deadbeef  {asset}\n"))
-        .create();
-
-    let output = yacli()
-        .args(["update", "--check", "--base-url", &base_url])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let value: Value = serde_json::from_slice(&output).expect("valid json");
-    assert_eq!(value["operation"], "update.check");
-    assert_eq!(value["status"], "update_available");
-    assert_eq!(value["requested_version"], "latest");
-    assert_eq!(value["target_version"], "9.9.9");
-    assert_eq!(value["asset"], asset);
-    assert_eq!(value["target"], target);
-    assert_eq!(value["base_url"], base_url);
-}
 
 #[test]
 fn mail_read_help_uses_positional_id() {

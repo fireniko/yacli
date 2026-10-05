@@ -18,17 +18,6 @@ fn yacli() -> Command {
     command
 }
 
-fn current_release_update_target() -> &'static str {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64") => "yacli-aarch64-apple-darwin.tar.gz",
-        ("macos", "x86_64") => "yacli-x86_64-apple-darwin.tar.gz",
-        ("linux", "aarch64") => "yacli-aarch64-unknown-linux-gnu.tar.gz",
-        ("linux", "x86_64") => "yacli-x86_64-unknown-linux-gnu.tar.gz",
-        ("windows", "x86_64") => "yacli-x86_64-pc-windows-msvc.zip",
-        (os, arch) => panic!("unsupported published auto-update target {arch}-{os}"),
-    }
-}
-
 fn mcp_request(id: u64, method: &str, params: Value) -> String {
     let body = serde_json::to_string(&json!({
         "jsonrpc": "2.0",
@@ -3214,14 +3203,6 @@ fn mcp_stdio_apps_capable_clients_receive_ui_metadata_and_resources() {
     assert_eq!(account_tool["_meta"]["ui"]["visibility"][0], "model");
     assert_eq!(account_tool["_meta"]["ui"]["visibility"][1], "app");
 
-    let update_tool = tools
-        .iter()
-        .find(|tool| tool["name"] == "yacli.update.check")
-        .expect("update tool");
-    assert_eq!(update_tool["_meta"]["ui"]["resourceUri"], APP_RESOURCE_URI);
-    assert_eq!(update_tool["_meta"]["ui"]["visibility"][0], "model");
-    assert_eq!(update_tool["_meta"]["ui"]["visibility"][1], "app");
-
     let resources = responses[2]["result"]["resources"]
         .as_array()
         .expect("resources array");
@@ -3469,7 +3450,6 @@ fn mcp_stdio_apps_capable_clients_receive_ui_metadata_and_resources() {
     assert!(html.contains("current-view-uri"));
     assert!(html.contains("Open MCP Apps docs"));
     assert!(html.contains("List accounts"));
-    assert!(html.contains("Check updates"));
 }
 
 #[test]
@@ -3852,49 +3832,6 @@ fn mcp_stdio_doctor_apply_safe_tool_installs_detected_claude_desktop() {
     assert!(expected_config.exists());
 }
 
-#[test]
-fn mcp_stdio_update_check_tool_reads_release_mirror() {
-    let mut server = Server::new();
-    let base_url = format!("{}/releases/download/v9.9.9", server.url());
-    let asset = current_release_update_target();
-    let _checksums = server
-        .mock("GET", "/releases/download/v9.9.9/SHA256SUMS")
-        .with_status(200)
-        .with_header("content-type", "text/plain")
-        .with_body(format!("deadbeef  {asset}\n"))
-        .create();
-
-    let input = [
-        initialize_request(false),
-        mcp_request(
-            2,
-            "tools/call",
-            json!({
-                "name": "yacli.update.check",
-                "arguments": {}
-            }),
-        ),
-    ]
-    .concat();
-
-    let output = yacli()
-        .env("YACLI_UPDATE_BASE_URL", &base_url)
-        .args(["mcp"])
-        .write_stdin(input)
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let responses = parse_responses(&output);
-    let structured = &responses[1]["result"]["structuredContent"];
-    assert_eq!(structured["operation"], "update.check");
-    assert_eq!(structured["status"], "update_available");
-    assert_eq!(structured["targetVersion"], "9.9.9");
-    assert_eq!(structured["requestedVersion"], "latest");
-    assert_eq!(structured["baseUrl"], base_url);
-}
 
 #[test]
 fn mcp_stdio_lists_resource_templates_and_reads_templated_resources() {

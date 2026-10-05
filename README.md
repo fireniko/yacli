@@ -67,44 +67,20 @@ TODO: добавить GIF / скриншот терминала с yacli mail l
 
 ## Установка
 
-### macOS и Linux
+В этом форке готовые бинарники, `install.sh` / `install.ps1` и самообновление (`yacli update`) удалены. Единственный поддерживаемый способ установки — сборка из исходников:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/NextStat/yacli/main/scripts/install.sh | sh
+cargo build --release                  # бинарник: target/release/yacli (Windows: yacli.exe)
 ```
 
-### Windows
-
-```powershell
-irm https://raw.githubusercontent.com/NextStat/yacli/main/scripts/install.ps1 | iex
-```
-
-Готовые сборки для macOS `x86_64`/`arm64`, Linux `x86_64`/`arm64` и Windows `x86_64` лежат в [GitHub Releases](https://github.com/NextStat/yacli/releases).
-
-<details>
-<summary>Из исходников / обновление / private mirror</summary>
-
-```bash
-cargo install --path .                 # сборка из исходников
-yacli update                           # обновить до последнего релиза
-yacli update --check                   # проверить без установки
-```
-
-Для private release mirror:
-
-```bash
-export YACLI_UPDATE_BASE_URL='https://mirror.example.test/releases/download/v0.5.5'
-yacli update --check
-```
-
-</details>
+Требуется Rust >= 1.85 (на Windows — MSVC build tools). Собранный бинарник подключается к MCP-клиенту вручную, например `claude mcp add yandex-mail --scope user -- <путь>/yacli mcp`.
 
 ## Быстрый старт
 
 **Запуск за минуту**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/NextStat/yacli/main/scripts/install.sh | sh
+cargo build --release
 yacli setup me@yandex.ru --calendar-app-password <пароль> --client claude
 ```
 
@@ -392,7 +368,7 @@ yacli mail search "счет" --account work
 | `Один runtime` | Почта, календарь и диск живут в одном бинаре, одном конфиге и одном агентском контракте. |
 | `Apps-first MCP` | Не только tools, но и MCP Apps: dashboard, prompts, embedded skills, resources, live subscriptions. |
 | `Кросс-сервисные workflows` | Путь `письмо → вложение → .ics → событие`, `файл → письмо`, `агент → MCP prompt → действие`. |
-| `Ship-ready` | Готовые релизы для macOS, Linux `x86_64`/`arm64`, Windows `x86_64`, плюс `yacli update`. |
+| `Ship-ready` | Сборка из исходников (`cargo build --release`); готовые релизы и самообновление в форке удалены. |
 
 ```mermaid
 flowchart LR
@@ -442,10 +418,10 @@ yacli mcp install --client cursor          # Cursor
 
 | Слой | Содержимое |
 | --- | --- |
-| `tools` | mail, calendar, disk, account, auth, update, roots |
+| `tools` | mail, calendar, disk, account, auth, roots |
 | `resources` | account/auth, skills catalog, templated resources |
 | `prompts` | shared, mail, calendar, disk, daily-briefing, find-and-read, reply-with-context, attachment-to-disk, send-file-by-mail, send-link-by-mail, publish-file-link, revoke-public-link, invite-to-calendar |
-| `apps` | `ui://yacli/dashboard` — browser, tool runner, resource inspector, update check |
+| `apps` | `ui://yacli/dashboard` — browser, tool runner, resource inspector |
 | `completions` | accounts, folders, calendars, skills, dashboard args |
 
 | Клиент | MCP | Apps / UI | Skills | Prompts |
@@ -574,7 +550,6 @@ MCP Apps доступны через `ui://yacli/dashboard`:
 - Capability-aware host profile — показывает, что host умеет, и рекомендует workflow
 - Persistent view state в browser storage
 - Auth escalation surface для protected tools
-- Safe update check из Apps runtime
 
 </details>
 

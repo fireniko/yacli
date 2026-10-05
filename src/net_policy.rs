@@ -345,6 +345,29 @@ mod tests {
         assert!(check_redirect_target_strict(&u("http://cloud-api.yandex.net/x"), disk).is_err());
     }
 
+    #[cfg(debug_assertions)]
+    #[test]
+    fn debug_builds_allow_local_mock_endpoints_in_wrappers() {
+        assert!(test_overrides_enabled());
+        parse_endpoint("t", "http://127.0.0.1:1234", OAUTH_HOSTS).expect("debug endpoint");
+        parse_transfer_url("t", "http://127.0.0.1:1234/upload").expect("debug transfer");
+        check_imap_endpoint("127.0.0.1", 1143).expect("debug imap");
+        // The strict validators stay strict in every profile.
+        assert!(validate_transfer_url_strict("t", "http://127.0.0.1:1234/x").is_err());
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn release_builds_reject_non_yandex_transfer_urls_and_redirects() {
+        assert!(parse_transfer_url("t", "http://127.0.0.1:1234/upload").is_err());
+        assert!(parse_transfer_url("t", "https://evil.example/upload").is_err());
+        assert!(parse_transfer_url("t", "https://yandex.net.evil.com/x").is_err());
+        parse_transfer_url("t", "https://uploader1.yandex.net/x").expect("yandex host");
+        // Policy objects can be built in release builds without panicking.
+        let _ = redirect_policy(RedirectScope::YandexTransfer);
+        let _ = redirect_policy(RedirectScope::Hosts(CALDAV_HOSTS));
+    }
+
     #[cfg(not(debug_assertions))]
     #[test]
     fn release_builds_enforce_policy_in_wrappers() {
